@@ -27,17 +27,19 @@ enum CommercialChangeType {
 }
 
 model Account {
-  id              String          @id @default(uuid()) @db.Uuid
-  clientName      String          @map("client_name")
-  kittyType       KittyType       @map("kitty_type")
-  samOwnerId      String?         @map("sam_owner_id") @db.Uuid
-  currentMrr      Decimal         @map("current_mrr") @db.Decimal(12, 2)
-  contractStatus  ContractStatus  @map("contract_status")
-  lastMomDate     DateTime?       @map("last_mom_date") @db.Date
-  lastMeetingDate DateTime?       @map("last_meeting_date") @db.Date
-  onboardingDate  DateTime        @map("onboarding_date") @db.Date
-  externalCrmId   String?         @unique @map("external_crm_id")
-  createdAt       DateTime        @default(now()) @map("created_at")
+  id              String         @id @default(uuid()) @db.Uuid
+  clientName      String         @map("client_name")
+  kittyType       KittyType      @map("kitty_type")
+  samOwnerId      String?        @map("sam_owner_id") @db.Uuid
+  currentMrr      Decimal        @map("current_mrr") @db.Decimal(12, 2)
+  contractStatus  ContractStatus @map("contract_status")
+  /// Maintained by Phase 3 meetings.service.ts on MOM-send / meeting-create.
+  lastMomDate     DateTime?      @map("last_mom_date") @db.Date
+  /// Maintained by Phase 3 meetings.service.ts on meeting-create.
+  lastMeetingDate DateTime?      @map("last_meeting_date") @db.Date
+  onboardingDate  DateTime       @map("onboarding_date") @db.Date
+  externalCrmId   String?        @unique @map("external_crm_id")
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
 
   commercialChanges CommercialChange[]
   meetings          Meeting[]
@@ -48,17 +50,17 @@ model Account {
 }
 
 model CommercialChange {
-  id                       String                @id @default(uuid()) @db.Uuid
-  accountId                String                @map("account_id") @db.Uuid
-  changeType               CommercialChangeType  @map("change_type")
-  oldMrr                   Decimal               @map("old_mrr") @db.Decimal(12, 2)
-  newMrr                   Decimal               @map("new_mrr") @db.Decimal(12, 2)
-  effectiveDate            DateTime              @map("effective_date") @db.Date
-  clientApprovalAttached   Boolean               @map("client_approval_attached")
-  approvalFileUrl          String?               @map("approval_file_url")
-  accountsNotifiedDate     DateTime?             @map("accounts_notified_date")
-  createdBy                String                @map("created_by") @db.Uuid
-  createdAt                DateTime              @default(now()) @map("created_at")
+  id                     String               @id @default(uuid()) @db.Uuid
+  accountId              String               @map("account_id") @db.Uuid
+  changeType             CommercialChangeType @map("change_type")
+  oldMrr                 Decimal              @map("old_mrr") @db.Decimal(12, 2)
+  newMrr                 Decimal              @map("new_mrr") @db.Decimal(12, 2)
+  effectiveDate          DateTime             @map("effective_date") @db.Date
+  clientApprovalAttached Boolean              @map("client_approval_attached")
+  approvalFileUrl        String?              @map("approval_file_url")
+  accountsNotifiedDate   DateTime?            @map("accounts_notified_date") @db.Timestamptz(6)
+  createdBy              String               @map("created_by") @db.Uuid
+  createdAt              DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
 
   account Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
 
@@ -68,13 +70,13 @@ model CommercialChange {
 }
 
 model Meeting {
-  id           String    @id @default(uuid()) @db.Uuid
-  accountId    String    @map("account_id") @db.Uuid
-  meetingDate  DateTime  @map("meeting_date") @db.Date
-  momSent      Boolean   @default(false) @map("mom_sent")
-  momSentAt    DateTime? @map("mom_sent_at")
-  createdBy    String    @map("created_by") @db.Uuid
-  createdAt    DateTime  @default(now()) @map("created_at")
+  id          String    @id @default(uuid()) @db.Uuid
+  accountId   String    @map("account_id") @db.Uuid
+  meetingDate DateTime  @map("meeting_date") @db.Date
+  momSent     Boolean   @default(false) @map("mom_sent")
+  momSentAt   DateTime? @map("mom_sent_at") @db.Timestamptz(6)
+  createdBy   String    @map("created_by") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
   account Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
 
@@ -90,7 +92,7 @@ model AuditLog {
   action      String
   performedBy String   @map("performed_by") @db.Uuid
   payload     Json?
-  timestamp   DateTime @default(now())
+  timestamp   DateTime @default(now()) @db.Timestamptz(6)
 
   @@index([entityType, entityId])
   @@index([performedBy])

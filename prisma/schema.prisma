@@ -26,11 +26,18 @@ enum CommercialChangeType {
   TERMINATION
 }
 
+enum UserRole {
+  ADMIN
+  SAM_HEAD
+  SAM
+}
+
 model Account {
   id              String         @id @default(uuid()) @db.Uuid
   clientName      String         @map("client_name")
   kittyType       KittyType      @map("kitty_type")
   samOwnerId      String?        @map("sam_owner_id") @db.Uuid
+  samOwner        User?          @relation("SamOwner", fields: [samOwnerId], references: [id], onDelete: SetNull)
   currentMrr      Decimal        @map("current_mrr") @db.Decimal(12, 2)
   contractStatus  ContractStatus @map("contract_status")
   /// Maintained by Phase 3 meetings.service.ts on MOM-send / meeting-create.
@@ -97,4 +104,17 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([performedBy])
   @@map("audit_logs")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  name         String
+  role         UserRole
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  ownedAccounts Account[] @relation("SamOwner")
+
+  @@map("users")
 }

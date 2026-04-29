@@ -4,3 +4,8 @@ dist
 .env.local
 .vercel
 coverage
+.DS_Store
+*.log
+*.tsbuildinfo
+.idea/
+.vscode/

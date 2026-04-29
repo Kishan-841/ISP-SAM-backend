@@ -5,7 +5,7 @@ import { signSessionToken, SESSION_COOKIE } from '../../lib/jwt.js';
 import { prisma } from '../../prisma.js';
 
 const loginSchema = z.object({
-  email: z.string().email(),
+  email: z.string().email().transform((s) => s.toLowerCase()),
   password: z.string().min(1),
 });
 

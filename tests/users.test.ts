@@ -74,4 +74,39 @@ describe('POST /users', () => {
     const res = await authedPost(app, '/users', token).send({ email: 'bad', name: 'X' });
     expect(res.status).toBe(400);
   });
+
+  it('400 when SAM is created with non-SAM_HEAD samHeadId', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    const otherSam = await seedUser({ email: 'other@x.com', role: 'SAM' });
+    const token = await tokenFor(admin.id, 'ADMIN');
+    const res = await authedPost(app, '/users', token).send({
+      email: 'sam2@x.com', name: 'SAM 2', role: 'SAM', password: 'pw1234',
+      samHeadId: otherSam.id,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('201 when SAM is created with valid samHeadId; response includes samHead', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    const head = await seedUser({ email: 'head@x.com', name: 'The Head', role: 'SAM_HEAD' });
+    const token = await tokenFor(admin.id, 'ADMIN');
+    const res = await authedPost(app, '/users', token).send({
+      email: 'sam2@x.com', name: 'SAM 2', role: 'SAM', password: 'pw1234',
+      samHeadId: head.id,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.user.samHead?.id).toBe(head.id);
+    expect(res.body.user.samHead?.name).toBe('The Head');
+  });
+
+  it('400 when samHeadId is set on a non-SAM role', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    const head = await seedUser({ email: 'head@x.com', role: 'SAM_HEAD' });
+    const token = await tokenFor(admin.id, 'ADMIN');
+    const res = await authedPost(app, '/users', token).send({
+      email: 'admin2@x.com', name: 'Admin 2', role: 'ADMIN', password: 'pw1234',
+      samHeadId: head.id,
+    });
+    expect(res.status).toBe(400);
+  });
 });

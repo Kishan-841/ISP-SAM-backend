@@ -3,6 +3,7 @@ import cookieParser from 'cookie-parser';
 import { errorHandler } from './middlewares/error-handler.js';
 import { accountsRouter } from './modules/accounts/accounts.routes.js';
 import { authRouter } from './modules/auth/auth.routes.js';
+import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
 import { usersRouter } from './modules/users/users.routes.js';
 
 export const app = express();
@@ -14,6 +15,7 @@ app.get('/health', (_req, res) => {
 });
 
 app.use('/auth', authRouter);
+app.use('/dashboard', dashboardRouter);
 app.use('/users', usersRouter);
 app.use('/accounts', accountsRouter);
 app.use(errorHandler);

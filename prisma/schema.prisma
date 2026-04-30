@@ -46,6 +46,11 @@ model Account {
   lastMeetingDate DateTime?      @map("last_meeting_date") @db.Date
   onboardingDate  DateTime       @map("onboarding_date") @db.Date
   externalCrmId   String?        @unique @map("external_crm_id")
+  companyName     String?         @map("company_name")
+  mobileNumber    String?         @map("mobile_number")
+  leadId          String?         @unique @map("lead_id")
+  currentPlan     String?         @map("current_plan")
+  metadata        Json?
   createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
 
   commercialChanges CommercialChange[]

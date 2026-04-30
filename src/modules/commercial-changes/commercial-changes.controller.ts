@@ -1,5 +1,6 @@
 import type { Response } from 'express';
 import { z } from 'zod';
+import type { CommercialChangeType } from '@prisma/client';
 import { commercialChangesService } from './commercial-changes.service.js';
 import type { AuthedRequest } from '../auth/auth.middleware.js';
 
@@ -50,5 +51,23 @@ export const commercialChangesController = {
       }
       throw err;
     }
+  },
+
+  async list(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const type = req.query.type as CommercialChangeType | undefined;
+    const allowed: CommercialChangeType[] = ['UPGRADE', 'DOWNGRADE', 'RATE_REVISION', 'TERMINATION'];
+    if (type && !allowed.includes(type)) {
+      res.status(400).json({ error: 'Invalid type' });
+      return;
+    }
+    const changes = await commercialChangesService.list({
+      type,
+      requester: req.user,
+    });
+    res.json({ changes });
   },
 };

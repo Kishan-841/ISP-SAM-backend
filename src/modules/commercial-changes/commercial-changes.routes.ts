@@ -17,6 +17,8 @@ const upload = multer({
 export const commercialChangesRouter = Router();
 commercialChangesRouter.use(requireAuth);
 
+commercialChangesRouter.get('/', commercialChangesController.list);
+
 commercialChangesRouter.post(
   '/',
   // Multer error → translate into 422 (matches the hard-gate semantics)

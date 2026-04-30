@@ -1,8 +1,10 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import type { CommercialChangeType, Prisma } from '@prisma/client';
+import type { CommercialChangeType, Prisma, UserRole } from '@prisma/client';
 import { prisma } from '../../prisma.js';
 import { buildAccountsTeamDraft, type EmailDraft } from './notification-bridge.js';
+
+export type Requester = { id: string; role: UserRole };
 
 export type CommitInput = {
   accountId: string;
@@ -129,5 +131,30 @@ export const commercialChangesService = {
       },
       emailDraft,
     };
+  },
+
+  async list(opts: { type?: CommercialChangeType; requester: Requester }) {
+    // SAMs see only their own; SAM_HEAD/ADMIN see all
+    const accountWhere =
+      opts.requester.role === 'SAM' ? { samOwnerId: opts.requester.id } : undefined;
+
+    return prisma.commercialChange.findMany({
+      where: {
+        ...(opts.type ? { changeType: opts.type } : {}),
+        ...(accountWhere ? { account: accountWhere } : {}),
+      },
+      include: {
+        account: {
+          select: {
+            id: true,
+            clientName: true,
+            customerCode: true,
+            circuitId: true,
+            kittyType: true,
+          },
+        },
+      },
+      orderBy: [{ effectiveDate: 'desc' }, { id: 'desc' }],
+    });
   },
 };

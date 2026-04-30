@@ -3,6 +3,7 @@ import request from 'supertest';
 import { app } from '../src/server.js';
 import { resetDb, seedAccount, seedUser } from './helpers/db.js';
 import { tokenFor, authedGet } from './helpers/auth.js';
+import { prisma } from '../src/prisma.js';
 
 beforeAll(() => {
   process.env.JWT_SECRET = 'test-secret-min-32-characters-long-aaa';
@@ -64,5 +65,156 @@ describe('GET /dashboard/existing-base', () => {
     expect(res.body.totalBaseArcLakh).toBe(24);       // both counted (start)
     expect(res.body.currentArcLakh).toBe(12);         // only the active one
     expect(res.body.terminatedCount).toBe(1);
+  });
+});
+
+describe('GET /dashboard/existing-base — waterfall aggregation', () => {
+  it('aggregates UPGRADE: 1 count, ARC added', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    const acct = await seedAccount({
+      kittyType: 'BASE',
+      currentMrr: 60000,
+      startOfPeriodMrr: 50000,
+    });
+    await prisma.commercialChange.create({
+      data: {
+        accountId: acct.id,
+        changeType: 'UPGRADE',
+        oldMrr: 50000,
+        newMrr: 60000,
+        effectiveDate: new Date('2026-04-15'),
+        clientApprovalAttached: true,
+        createdBy: admin.id,
+      },
+    });
+
+    const token = await tokenFor(admin.id, 'ADMIN');
+    const res = await authedGet(app, '/dashboard/existing-base', token);
+    expect(res.body.upgrades.count).toBe(1);
+    // (60000 - 50000) * 12 = 120000 = 1.2L
+    expect(res.body.upgrades.arcAddedLakh).toBeCloseTo(1.2, 1);
+  });
+
+  it('aggregates DOWNGRADE as positive ARC reduced magnitude', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    const acct = await seedAccount({
+      kittyType: 'BASE',
+      currentMrr: 40000,
+      startOfPeriodMrr: 50000,
+    });
+    await prisma.commercialChange.create({
+      data: {
+        accountId: acct.id,
+        changeType: 'DOWNGRADE',
+        oldMrr: 50000,
+        newMrr: 40000,
+        effectiveDate: new Date('2026-04-15'),
+        clientApprovalAttached: true,
+        createdBy: admin.id,
+      },
+    });
+
+    const token = await tokenFor(admin.id, 'ADMIN');
+    const res = await authedGet(app, '/dashboard/existing-base', token);
+    expect(res.body.downgrades.count).toBe(1);
+    // (50000 - 40000) * 12 = 120000 = 1.2L
+    expect(res.body.downgrades.arcReducedLakh).toBeCloseTo(1.2, 1);
+  });
+
+  it('aggregates TERMINATION as full ARC lost', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    const acct = await seedAccount({
+      kittyType: 'BASE',
+      currentMrr: 0,
+      startOfPeriodMrr: 100000,
+      contractStatus: 'TERMINATED',
+    });
+    await prisma.commercialChange.create({
+      data: {
+        accountId: acct.id,
+        changeType: 'TERMINATION',
+        oldMrr: 100000,
+        newMrr: 0,
+        effectiveDate: new Date('2026-04-15'),
+        clientApprovalAttached: true,
+        createdBy: admin.id,
+      },
+    });
+
+    const token = await tokenFor(admin.id, 'ADMIN');
+    const res = await authedGet(app, '/dashboard/existing-base', token);
+    expect(res.body.terminations.count).toBe(1);
+    // 100000 * 12 = 1200000 = 12L
+    expect(res.body.terminations.arcLostLakh).toBeCloseTo(12, 0);
+  });
+
+  it('aggregates RATE_REVISION', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    const acct = await seedAccount({
+      kittyType: 'BASE',
+      currentMrr: 48000,
+      startOfPeriodMrr: 50000,
+    });
+    await prisma.commercialChange.create({
+      data: {
+        accountId: acct.id,
+        changeType: 'RATE_REVISION',
+        oldMrr: 50000,
+        newMrr: 48000,
+        effectiveDate: new Date('2026-04-15'),
+        clientApprovalAttached: true,
+        createdBy: admin.id,
+      },
+    });
+
+    const token = await tokenFor(admin.id, 'ADMIN');
+    const res = await authedGet(app, '/dashboard/existing-base', token);
+    expect(res.body.rateRevisions.count).toBe(1);
+    // (50000 - 48000) * 12 = 24000 = 0.24L → rounded to 1 decimal = 0.2L
+    expect(res.body.rateRevisions.arcChangeLakh).toBeCloseTo(0.2, 1);
+  });
+
+  it('ignores commercial changes against NEW kitty accounts (Existing Base only)', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    const newAcct = await seedAccount({
+      kittyType: 'NEW',
+      currentMrr: 60000,
+      startOfPeriodMrr: 50000,
+      onboardingDate: new Date('2026-04-15'),
+    });
+    await prisma.commercialChange.create({
+      data: {
+        accountId: newAcct.id,
+        changeType: 'UPGRADE',
+        oldMrr: 50000,
+        newMrr: 60000,
+        effectiveDate: new Date('2026-04-20'),
+        clientApprovalAttached: true,
+        createdBy: admin.id,
+      },
+    });
+
+    const token = await tokenFor(admin.id, 'ADMIN');
+    const res = await authedGet(app, '/dashboard/existing-base', token);
+    expect(res.body.upgrades.count).toBe(0);
+    expect(res.body.upgrades.arcAddedLakh).toBe(0);
+  });
+
+  it('totalBaseArcLakh now reads from startOfPeriodMrr (not currentMrr)', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    // Account was onboarded at MRR 50k, then upgraded to 60k.
+    await seedAccount({
+      kittyType: 'BASE',
+      currentMrr: 60000,
+      startOfPeriodMrr: 50000,
+    });
+
+    const token = await tokenFor(admin.id, 'ADMIN');
+    const res = await authedGet(app, '/dashboard/existing-base', token);
+    // Start-of-period ARC reflects the original 50k baseline, not the 60k current.
+    // 50000 * 12 = 600000 = 6L
+    expect(res.body.totalBaseArcLakh).toBeCloseTo(6, 1);
+    // Current ARC reflects the 60k post-upgrade.
+    expect(res.body.currentArcLakh).toBeCloseTo(7.2, 1);
   });
 });

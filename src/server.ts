@@ -5,6 +5,7 @@ import { accountsRouter } from './modules/accounts/accounts.routes.js';
 import { authRouter } from './modules/auth/auth.routes.js';
 import { commercialChangesRouter } from './modules/commercial-changes/commercial-changes.routes.js';
 import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
+import { leaderboardRouter } from './modules/leaderboard/leaderboard.routes.js';
 import { meetingsRouter } from './modules/meetings/meetings.routes.js';
 import { usersRouter } from './modules/users/users.routes.js';
 
@@ -21,6 +22,7 @@ app.use('/dashboard', dashboardRouter);
 app.use('/users', usersRouter);
 app.use('/accounts', accountsRouter);
 app.use('/commercial-changes', commercialChangesRouter);
+app.use('/leaderboard', leaderboardRouter);
 app.use('/meetings', meetingsRouter);
 app.use(errorHandler);
 

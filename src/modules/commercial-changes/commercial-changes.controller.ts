@@ -1,0 +1,54 @@
+import type { Response } from 'express';
+import { z } from 'zod';
+import { commercialChangesService } from './commercial-changes.service.js';
+import type { AuthedRequest } from '../auth/auth.middleware.js';
+
+const bodySchema = z.object({
+  accountId: z.string().uuid(),
+  changeType: z.enum(['UPGRADE', 'DOWNGRADE', 'RATE_REVISION', 'TERMINATION']),
+  newMrr: z.coerce.number().nonnegative(),
+  newBandwidthMbps: z.coerce.number().int().nonnegative().optional(),
+  effectiveDate: z.string().refine((s) => !Number.isNaN(Date.parse(s)), 'Invalid date'),
+  reason: z.string().optional(),
+});
+
+export const commercialChangesController = {
+  async commit(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+
+    const file = (req as AuthedRequest & { file?: { buffer: Buffer; originalname?: string } }).file;
+    if (!file) {
+      res.status(422).json({ error: 'Client approval email is mandatory' });
+      return;
+    }
+
+    const parse = bodySchema.safeParse(req.body);
+    if (!parse.success) {
+      res.status(400).json({ error: parse.error.issues[0]?.message ?? 'Invalid body' });
+      return;
+    }
+
+    try {
+      const result = await commercialChangesService.commit({
+        accountId: parse.data.accountId,
+        changeType: parse.data.changeType,
+        newMrr: parse.data.newMrr,
+        newBandwidthMbps: parse.data.newBandwidthMbps ?? null,
+        effectiveDate: new Date(parse.data.effectiveDate),
+        reason: parse.data.reason ?? null,
+        approvalFile: { buffer: file.buffer, originalName: file.originalname ?? 'approval' },
+        performedByUserId: req.user.id,
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Account not found') {
+        res.status(404).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+  },
+};

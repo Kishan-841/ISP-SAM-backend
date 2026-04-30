@@ -9,7 +9,7 @@ async function main() {
     throw new Error('ADMIN_PASSWORD env var is required to seed the admin user');
   }
 
-  const email = 'admin@gazonindia.com';
+  const email = process.env.ADMIN_EMAIL ?? 'admin@ispcrm.com';
   const passwordHash = await bcrypt.hash(password, 12);
 
   const admin = await prisma.user.upsert({

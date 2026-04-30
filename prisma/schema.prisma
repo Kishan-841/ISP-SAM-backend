@@ -89,18 +89,20 @@ model CommercialChange {
 }
 
 model Meeting {
-  id          String    @id @default(uuid()) @db.Uuid
-  accountId   String    @map("account_id") @db.Uuid
-  meetingDate DateTime  @map("meeting_date") @db.Date
-  momSent     Boolean   @default(false) @map("mom_sent")
-  momSentAt   DateTime? @map("mom_sent_at") @db.Timestamptz(6)
-  createdBy   String    @map("created_by") @db.Uuid
-  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  id           String    @id @default(uuid()) @db.Uuid
+  accountId    String    @map("account_id") @db.Uuid
+  scheduledAt  DateTime  @map("scheduled_at") @db.Timestamptz(6)
+  heldAt       DateTime? @map("held_at") @db.Timestamptz(6)
+  agenda       String?
+  momContent   String?   @map("mom_content")
+  momSentAt    DateTime? @map("mom_sent_at") @db.Timestamptz(6)
+  createdBy    String    @map("created_by") @db.Uuid
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
   account Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
 
   @@index([accountId])
-  @@index([meetingDate])
+  @@index([scheduledAt])
   @@map("meetings")
 }
 

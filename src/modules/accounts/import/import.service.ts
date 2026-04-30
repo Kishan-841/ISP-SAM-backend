@@ -75,11 +75,12 @@ function validate(row: ParsedRow): { error: string } | { data: ValidatedData } {
   if (!c.clientName) return { error: 'Missing customer/client name' };
   if (!c.onboardingDate) return { error: 'Missing onboarding date' };
 
-  // currentMrr: prefer explicit MRR, else compute from ARC ÷ 12
-  let mrr: number | null = null;
+  // currentMrr: prefer explicit MRR, else compute from ARC ÷ 12.
+  // Default to 0 when neither is provided — these rows still count towards
+  // headcount and can have MRR filled in later via the customers page.
+  let mrr = 0;
   if (typeof c.currentMrr === 'number') mrr = c.currentMrr;
   else if (typeof c.currentArc === 'number') mrr = c.currentArc / 12;
-  if (mrr === null) return { error: 'Missing MRR/ARC' };
 
   // contractStatus
   let status: ContractStatus = 'ACTIVE';

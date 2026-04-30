@@ -87,9 +87,11 @@ describe('POST /accounts/import', () => {
       .set('Cookie', cookie)
       .attach('file', fixture('missing-required.csv'), 'missing-required.csv');
     expect(res.status).toBe(200);
-    expect(res.body.imported).toBe(0);
-    expect(res.body.skipped).toBe(3);
-    expect(res.body.errors).toHaveLength(3);
+    // The row missing ARC now imports with currentMrr=0; rows missing the
+    // truly-required fields (clientName, onboardingDate) still skip.
+    expect(res.body.imported).toBe(1);
+    expect(res.body.skipped).toBe(2);
+    expect(res.body.errors).toHaveLength(2);
     expect(res.body.errors[0].rowNumber).toBe(2);
   });
 

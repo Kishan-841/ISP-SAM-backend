@@ -10,7 +10,23 @@ export type ImportSummary = {
   errors: { rowNumber: number; reason: string }[];
 };
 
-const ALLOWED_STATUSES: ContractStatus[] = ['ACTIVE', 'EXPIRED', 'TERMINATED', 'PENDING'];
+const STATUS_ALIASES: Record<string, ContractStatus> = {
+  active: 'ACTIVE',
+  live: 'ACTIVE',
+  inservice: 'ACTIVE',
+  pending: 'PENDING',
+  new: 'PENDING',
+  inprogress: 'PENDING',
+  expired: 'EXPIRED',
+  suspended: 'EXPIRED',
+  paused: 'EXPIRED',
+  terminated: 'TERMINATED',
+  closed: 'TERMINATED',
+  disconnected: 'TERMINATED',
+  cancelled: 'TERMINATED',
+  canceled: 'TERMINATED',
+  churned: 'TERMINATED',
+};
 
 export const importService = {
   async importWorkbook(buffer: Buffer): Promise<ImportSummary> {
@@ -36,9 +52,12 @@ export const importService = {
         if (dedupKey) {
           const existing = await prisma.account.findFirst({ where: dedupKey });
           if (existing) {
+            // On update path: don't overwrite startOfPeriodMrr (it's a snapshot
+            // at first-import time and the dashboard waterfall reads it).
+            const { startOfPeriodMrr: _ignored, ...updateData } = data;
             await prisma.account.update({
               where: { id: existing.id },
-              data: { ...data },
+              data: updateData,
             });
             summary.updated++;
             continue;
@@ -60,6 +79,7 @@ type ValidatedData = {
   clientName: string;
   kittyType: 'BASE' | 'NEW';
   currentMrr: number;
+  startOfPeriodMrr: number;
   contractStatus: ContractStatus;
   onboardingDate: Date;
   companyName?: string | null;
@@ -67,6 +87,7 @@ type ValidatedData = {
   leadId?: string | null;
   externalCrmId?: string | null;
   currentPlan?: string | null;
+  bandwidthMbps?: number | null;
   metadata?: object;
 };
 
@@ -76,20 +97,19 @@ function validate(row: ParsedRow): { error: string } | { data: ValidatedData } {
   if (!c.onboardingDate) return { error: 'Missing onboarding date' };
 
   // currentMrr: prefer explicit MRR, else compute from ARC ÷ 12.
-  // Default to 0 when neither is provided — these rows still count towards
-  // headcount and can have MRR filled in later via the customers page.
-  let mrr = 0;
+  // MRR/ARC is required — rows without either are skipped.
+  let mrr: number;
   if (typeof c.currentMrr === 'number') mrr = c.currentMrr;
   else if (typeof c.currentArc === 'number') mrr = c.currentArc / 12;
+  else return { error: 'Missing MRR/ARC' };
 
-  // contractStatus
+  // contractStatus — accept aliases (e.g. "Closed" -> TERMINATED, "Live" -> ACTIVE).
   let status: ContractStatus = 'ACTIVE';
   if (c.contractStatus) {
-    const upper = c.contractStatus.toUpperCase();
-    if (!(ALLOWED_STATUSES as string[]).includes(upper)) {
-      return { error: `Invalid contract status: ${c.contractStatus}` };
-    }
-    status = upper as ContractStatus;
+    const normalized = c.contractStatus.toLowerCase().replace(/[^a-z]/g, '');
+    const mapped = STATUS_ALIASES[normalized];
+    if (!mapped) return { error: `Invalid contract status: ${c.contractStatus}` };
+    status = mapped;
   }
 
   return {
@@ -97,6 +117,9 @@ function validate(row: ParsedRow): { error: string } | { data: ValidatedData } {
       clientName: c.clientName,
       kittyType: deriveKittyType(c.onboardingDate),
       currentMrr: mrr,
+      // Snapshot at create-time. The update path strips this so re-imports
+      // don't overwrite the original baseline.
+      startOfPeriodMrr: mrr,
       contractStatus: status,
       onboardingDate: c.onboardingDate,
       companyName: c.companyName ?? null,
@@ -104,6 +127,7 @@ function validate(row: ParsedRow): { error: string } | { data: ValidatedData } {
       leadId: c.leadId ?? null,
       externalCrmId: c.externalCrmId ?? null,
       currentPlan: c.currentPlan ?? null,
+      bandwidthMbps: typeof c.bandwidthMbps === 'number' ? c.bandwidthMbps : null,
       metadata: Object.keys(row.metadata).length > 0 ? row.metadata : undefined,
     },
   };

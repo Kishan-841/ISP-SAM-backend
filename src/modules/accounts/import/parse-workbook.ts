@@ -53,6 +53,10 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
           continue;
         }
         canonical[key] = n;
+      } else if (key === 'bandwidthMbps') {
+        const n = parseInt(String(value).replace(/[^0-9]/g, ''), 10);
+        if (Number.isFinite(n)) canonical[key] = n;
+        // else silently skip — bandwidth is optional
       } else if (key === 'onboardingDate') {
         const d = parseDate(value);
         if (d === null) {

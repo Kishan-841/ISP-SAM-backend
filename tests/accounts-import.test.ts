@@ -87,12 +87,69 @@ describe('POST /accounts/import', () => {
       .set('Cookie', cookie)
       .attach('file', fixture('missing-required.csv'), 'missing-required.csv');
     expect(res.status).toBe(200);
-    // The row missing ARC now imports with currentMrr=0; rows missing the
-    // truly-required fields (clientName, onboardingDate) still skip.
-    expect(res.body.imported).toBe(1);
-    expect(res.body.skipped).toBe(2);
-    expect(res.body.errors).toHaveLength(2);
+    // MRR/ARC is required, so the missing-ARC row also fails.
+    // Row 2: missing name, Row 3: missing ARC, Row 4: missing date.
+    expect(res.body.imported).toBe(0);
+    expect(res.body.skipped).toBe(3);
+    expect(res.body.errors).toHaveLength(3);
     expect(res.body.errors[0].rowNumber).toBe(2);
+  });
+
+  it("aliases status 'Closed' to TERMINATED", async () => {
+    const cookie = await adminCookie();
+    const res = await request(app)
+      .post('/accounts/import')
+      .set('Cookie', cookie)
+      .attach('file', fixture('with-bandwidth-and-aliases.csv'), 'with-bandwidth-and-aliases.csv');
+    expect(res.status).toBe(200);
+    expect(res.body.imported).toBe(1);
+    const list = await request(app).get('/accounts').set('Cookie', cookie);
+    const acc = list.body.accounts.find((a: { leadId: string }) => a.leadId === 'LEAD-CLOSED');
+    expect(acc).toBeDefined();
+    expect(acc.contractStatus).toBe('TERMINATED');
+  });
+
+  it('auto-generates customerCode and circuitId on create', async () => {
+    const cookie = await adminCookie();
+    const res = await request(app)
+      .post('/accounts/import')
+      .set('Cookie', cookie)
+      .attach('file', fixture('with-bandwidth-and-aliases.csv'), 'with-bandwidth-and-aliases.csv');
+    expect(res.status).toBe(200);
+    expect(res.body.imported).toBe(1);
+    const list = await request(app).get('/accounts').set('Cookie', cookie);
+    const acc = list.body.accounts.find((a: { leadId: string }) => a.leadId === 'LEAD-CLOSED');
+    expect(acc).toBeDefined();
+    expect(acc.customerCode).toMatch(/^GAZ-\d{4}$/);
+    expect(acc.circuitId).toMatch(/^CKT-\d{4}$/);
+  });
+
+  it('stores bandwidthMbps when present', async () => {
+    const cookie = await adminCookie();
+    const res = await request(app)
+      .post('/accounts/import')
+      .set('Cookie', cookie)
+      .attach('file', fixture('with-bandwidth-and-aliases.csv'), 'with-bandwidth-and-aliases.csv');
+    expect(res.status).toBe(200);
+    expect(res.body.imported).toBe(1);
+    const list = await request(app).get('/accounts').set('Cookie', cookie);
+    const acc = list.body.accounts.find((a: { leadId: string }) => a.leadId === 'LEAD-CLOSED');
+    expect(acc).toBeDefined();
+    expect(acc.bandwidthMbps).toBe(100);
+  });
+
+  it('sets startOfPeriodMrr on create equal to imported currentMrr', async () => {
+    const cookie = await adminCookie();
+    const res = await request(app)
+      .post('/accounts/import')
+      .set('Cookie', cookie)
+      .attach('file', fixture('valid.csv'), 'valid.csv');
+    expect(res.status).toBe(200);
+    expect(res.body.imported).toBe(3);
+    const list = await request(app).get('/accounts').set('Cookie', cookie);
+    for (const acc of list.body.accounts) {
+      expect(Number(acc.startOfPeriodMrr)).toBe(Number(acc.currentMrr));
+    }
   });
 
   it('updates existing rows on re-import (idempotent on leadId)', async () => {

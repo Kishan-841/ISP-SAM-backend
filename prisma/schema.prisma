@@ -51,6 +51,10 @@ model Account {
   leadId          String?         @unique @map("lead_id")
   currentPlan     String?         @map("current_plan")
   metadata        Json?
+  customerCode       String?  @unique @map("customer_code")
+  circuitId          String?  @unique @map("circuit_id")
+  bandwidthMbps      Int?     @map("bandwidth_mbps")
+  startOfPeriodMrr   Decimal? @map("start_of_period_mrr") @db.Decimal(12, 2)
   createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
 
   commercialChanges CommercialChange[]
@@ -72,6 +76,9 @@ model CommercialChange {
   approvalFileUrl        String?              @map("approval_file_url")
   accountsNotifiedDate   DateTime?            @map("accounts_notified_date") @db.Timestamptz(6)
   createdBy              String               @map("created_by") @db.Uuid
+  reason              String?
+  oldBandwidthMbps    Int?     @map("old_bandwidth_mbps")
+  newBandwidthMbps    Int?     @map("new_bandwidth_mbps")
   createdAt              DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
 
   account Account @relation(fields: [accountId], references: [id], onDelete: Restrict)

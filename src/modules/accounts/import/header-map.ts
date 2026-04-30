@@ -16,6 +16,7 @@ export type CanonicalRow = {
   leadId?: string;
   externalCrmId?: string;
   currentPlan?: string;
+  bandwidthMbps?: number;
 };
 
 export const HEADER_SYNONYMS: Record<string, keyof CanonicalRow> = {
@@ -25,6 +26,8 @@ export const HEADER_SYNONYMS: Record<string, keyof CanonicalRow> = {
   name: 'clientName',
   client: 'clientName',
   customer: 'clientName',
+  subscribername: 'clientName',
+  subscriber: 'clientName',
 
   // companyName
   companyname: 'companyName',
@@ -38,12 +41,19 @@ export const HEADER_SYNONYMS: Record<string, keyof CanonicalRow> = {
   phone: 'mobileNumber',
   contact: 'mobileNumber',
   contactnumber: 'mobileNumber',
+  phonenumber: 'mobileNumber',
 
   // currentMrr (monthly)
   mrr: 'currentMrr',
   monthlymrr: 'currentMrr',
   currentmrr: 'currentMrr',
   monthlyrevenue: 'currentMrr',
+  monthlybill: 'currentMrr',
+  planprice: 'currentMrr',
+  subscriptionfee: 'currentMrr',
+  monthlycharge: 'currentMrr',
+  monthlyplan: 'currentMrr',
+  tariff: 'currentMrr',
 
   // currentArc (annualized)  — converted to currentMrr (÷ 12) by parser
   arc: 'currentArc',
@@ -54,12 +64,16 @@ export const HEADER_SYNONYMS: Record<string, keyof CanonicalRow> = {
   // contractStatus
   status: 'contractStatus',
   contractstatus: 'contractStatus',
+  connectionstatus: 'contractStatus',
+  subscriptionstatus: 'contractStatus',
 
   // onboardingDate
   onboardingdate: 'onboardingDate',
   startdate: 'onboardingDate',
   joineddate: 'onboardingDate',
   since: 'onboardingDate',
+  installationdate: 'onboardingDate',
+  activationdate: 'onboardingDate',
 
   // leadId
   leadid: 'leadId',
@@ -69,12 +83,20 @@ export const HEADER_SYNONYMS: Record<string, keyof CanonicalRow> = {
   externalcrmid: 'externalCrmId',
   crmid: 'externalCrmId',
   customerid: 'externalCrmId',
+  subscriberid: 'externalCrmId',
+  connectionid: 'externalCrmId',
+  accountid: 'externalCrmId',
 
   // currentPlan
   currentplan: 'currentPlan',
   plan: 'currentPlan',
   package: 'currentPlan',
-  bandwidth: 'currentPlan',
+
+  // bandwidthMbps
+  bandwidth: 'bandwidthMbps',
+  mbps: 'bandwidthMbps',
+  speed: 'bandwidthMbps',
+  bandwidthmbps: 'bandwidthMbps',
 };
 
 export function normalizeHeader(header: string): string {

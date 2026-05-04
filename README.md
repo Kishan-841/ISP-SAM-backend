@@ -57,23 +57,26 @@ forensic audit. See `INTEGRATION.md` (in repo root or shared spec) and
 
 ## Deployment — Docker on the VM
 
-This backend deploys as a Docker service alongside Postgres on the Gazon
-VM. The frontend lives on Vercel and hits this backend over HTTPS via a
-subdomain (e.g. `sam.gazonindia.com`).
+This backend deploys as a docker-compose stack (`backend` + `postgres`) on
+the Gazon ISP VM. The frontend lives on Vercel and hits this backend over
+HTTPS at `sam.gazonindia.com`.
 
-**Status: deployment artefacts (Dockerfile, docker-compose.yml, nginx
-config, DEPLOY.md) will be added in a follow-up commit.** They aren't in
-this initial push because we want the application code to be the source
-of truth before the build/deploy plumbing is layered on.
+```sh
+cp .env.production.example .env       # fill in real secrets
+docker compose up -d --build
+```
 
-### Required environment for production
+See **DEPLOY.md** for the full step-by-step (nginx + TLS + smoke test +
+CRM-side env update + rollback).
 
-See `.env.example`. The critical ones:
+### Production env vars
 
-- `DATABASE_URL` — points at the docker-compose postgres service
-- `JWT_SECRET` — a fresh 32+ char string per environment
-- `CRM_WEBHOOK_SECRET` — must match what the CRM has configured
-- `ADMIN_EMAIL` / `ADMIN_PASSWORD` — first-boot admin
+See `.env.production.example`. Critical ones (all rotated per environment):
+
+- `POSTGRES_PASSWORD` — generated fresh on the VM, never committed
+- `JWT_SECRET` — 32+ char random string
+- `CRM_WEBHOOK_SECRET` — MUST byte-match the CRM's `SAM_WEBHOOK_SECRET`
+- `ADMIN_EMAIL` / `ADMIN_PASSWORD` — first-boot admin (rotate via /change-password immediately after login)
 
 ## Project structure
 

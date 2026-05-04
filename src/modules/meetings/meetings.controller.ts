@@ -3,10 +3,24 @@ import { z } from 'zod';
 import { meetingsService } from './meetings.service.js';
 import type { AuthedRequest } from '../auth/auth.middleware.js';
 
+const actionItemSchema = z.object({
+  srNo: z.number().int(),
+  discussionDescription: z.string().min(1),
+  actionOwner: z.string().default(''),
+  planOfAction: z.string().default(''),
+  closureDate: z.string().nullable().optional(),
+  currentStatus: z.enum(['Open', 'In Progress', 'Closed']).default('Open'),
+});
+
 const logSchema = z.object({
   accountId: z.string().uuid(),
   scheduledAt: z.string().refine((s) => !Number.isNaN(Date.parse(s)), 'Invalid date'),
   agenda: z.string().optional(),
+  meetingType: z.enum(['ONLINE', 'PHYSICAL']).default('ONLINE'),
+  location: z.string().optional(),
+  clientParticipants: z.string().optional(),
+  gazonParticipants: z.string().optional(),
+  actionItems: z.array(actionItemSchema).optional(),
 });
 
 const heldSchema = z.object({
@@ -42,6 +56,22 @@ export const meetingsController = {
         accountId: parse.data.accountId,
         scheduledAt: new Date(parse.data.scheduledAt),
         agenda: parse.data.agenda ?? null,
+        meetingType: parse.data.meetingType,
+        location:
+          parse.data.meetingType === 'PHYSICAL' ? parse.data.location?.trim() || null : null,
+        clientParticipants: parse.data.clientParticipants?.trim() || null,
+        gazonParticipants: parse.data.gazonParticipants?.trim() || null,
+        actionItems:
+          parse.data.actionItems && parse.data.actionItems.length > 0
+            ? parse.data.actionItems.map((item, idx) => ({
+                srNo: item.srNo || idx + 1,
+                discussionDescription: item.discussionDescription,
+                actionOwner: item.actionOwner ?? '',
+                planOfAction: item.planOfAction ?? '',
+                closureDate: item.closureDate ?? null,
+                currentStatus: item.currentStatus ?? 'Open',
+              }))
+            : null,
         performedByUserId: user.id,
       });
       res.status(201).json({ meeting });

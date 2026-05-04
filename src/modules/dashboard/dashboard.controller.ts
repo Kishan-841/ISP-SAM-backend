@@ -1,9 +1,24 @@
 import type { Request, Response } from 'express';
-import { dashboardService } from './dashboard.service.js';
+import {
+  dashboardService,
+  computeNewBase,
+  type FyQuarter,
+} from './dashboard.service.js';
+
+const QUARTERS = ['Q1', 'Q2', 'Q3', 'Q4'] as const;
 
 export const dashboardController = {
-  async existingBase(_req: Request, res: Response) {
-    const data = await dashboardService.existingBase();
+  async existingBase(req: Request, res: Response) {
+    const raw = typeof req.query.quarter === 'string' ? req.query.quarter : undefined;
+    const quarter: FyQuarter | undefined = (QUARTERS as readonly string[]).includes(raw ?? '')
+      ? (raw as FyQuarter)
+      : undefined;
+    const data = await dashboardService.existingBase({ quarter });
+    res.json(data);
+  },
+
+  async newBase(_req: Request, res: Response) {
+    const data = await computeNewBase();
     res.json(data);
   },
 };

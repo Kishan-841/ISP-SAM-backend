@@ -32,6 +32,11 @@ enum UserRole {
   SAM
 }
 
+enum MeetingType {
+  ONLINE
+  PHYSICAL
+}
+
 model Account {
   id              String         @id @default(uuid()) @db.Uuid
   clientName      String         @map("client_name")
@@ -47,6 +52,7 @@ model Account {
   onboardingDate  DateTime       @map("onboarding_date") @db.Date
   externalCrmId   String?        @unique @map("external_crm_id")
   companyName     String?         @map("company_name")
+  email           String?        @map("email")
   mobileNumber    String?         @map("mobile_number")
   leadId          String?         @unique @map("lead_id")
   currentPlan     String?         @map("current_plan")
@@ -89,15 +95,22 @@ model CommercialChange {
 }
 
 model Meeting {
-  id           String    @id @default(uuid()) @db.Uuid
-  accountId    String    @map("account_id") @db.Uuid
-  scheduledAt  DateTime  @map("scheduled_at") @db.Timestamptz(6)
-  heldAt       DateTime? @map("held_at") @db.Timestamptz(6)
-  agenda       String?
-  momContent   String?   @map("mom_content")
-  momSentAt    DateTime? @map("mom_sent_at") @db.Timestamptz(6)
-  createdBy    String    @map("created_by") @db.Uuid
-  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  id                 String       @id @default(uuid()) @db.Uuid
+  accountId          String       @map("account_id") @db.Uuid
+  scheduledAt        DateTime     @map("scheduled_at") @db.Timestamptz(6)
+  heldAt             DateTime?    @map("held_at") @db.Timestamptz(6)
+  agenda             String?
+  momContent         String?      @map("mom_content")
+  momSentAt          DateTime?    @map("mom_sent_at") @db.Timestamptz(6)
+  meetingType        MeetingType  @default(ONLINE) @map("meeting_type")
+  location           String?
+  /// JSON-stringified array of {name, position} — kept as TEXT to tolerate legacy comma-separated form.
+  clientParticipants String?      @map("client_participants")
+  gazonParticipants  String?      @map("gazon_participants")
+  /// JSON array of {srNo, discussionDescription, actionOwner, planOfAction, closureDate, currentStatus}.
+  actionItems        Json?        @map("action_items")
+  createdBy          String       @map("created_by") @db.Uuid
+  createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
 
   account Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
 
@@ -118,6 +131,37 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([performedBy])
   @@map("audit_logs")
+}
+
+enum IntegrationStatus {
+  PROCESSED
+  DUPLICATE
+  REJECTED
+  FAILED
+}
+
+model IntegrationEvent {
+  id              String            @id @default(uuid()) @db.Uuid
+  source          String            // 'CRM' for now; future: BILLING, etc.
+  eventType       String            @map("event_type")
+  /// External event UUID supplied by the source — primary idempotency key.
+  externalEventId String            @unique @map("external_event_id")
+  occurredAt      DateTime?         @map("occurred_at") @db.Timestamptz(6)
+  receivedAt      DateTime          @default(now()) @map("received_at") @db.Timestamptz(6)
+  status          IntegrationStatus
+  statusReason    String?           @map("status_reason")
+  accountId       String?           @map("account_id") @db.Uuid
+  payload         Json
+  /// X-CRM-Signature header value at receive time — kept for forensics.
+  signatureHeader String?           @map("signature_header")
+  timestampHeader String?           @map("timestamp_header")
+  remoteAddr      String?           @map("remote_addr")
+
+  @@index([source, eventType])
+  @@index([receivedAt])
+  @@index([status])
+  @@index([accountId])
+  @@map("integration_events")
 }
 
 model User {

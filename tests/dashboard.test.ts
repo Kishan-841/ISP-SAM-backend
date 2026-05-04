@@ -218,3 +218,90 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     expect(res.body.currentArcLakh).toBeCloseTo(7.2, 1);
   });
 });
+
+describe('GET /dashboard/existing-base — quarter filter', () => {
+  async function seedAcctWithChange(opts: {
+    admin: { id: string };
+    changeType: 'UPGRADE' | 'DOWNGRADE' | 'RATE_REVISION' | 'TERMINATION';
+    effectiveDate: Date;
+    oldMrr?: number;
+    newMrr?: number;
+  }) {
+    const oldMrr = opts.oldMrr ?? 50000;
+    const newMrr = opts.newMrr ?? 60000;
+    const acct = await seedAccount({
+      kittyType: 'BASE',
+      currentMrr: newMrr,
+      startOfPeriodMrr: oldMrr,
+    });
+    await prisma.commercialChange.create({
+      data: {
+        accountId: acct.id,
+        changeType: opts.changeType,
+        oldMrr,
+        newMrr,
+        effectiveDate: opts.effectiveDate,
+        clientApprovalAttached: true,
+        createdBy: opts.admin.id,
+      },
+    });
+    return acct;
+  }
+
+  it('Q1 filter only counts changes effective Apr–Jun', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    const token = await tokenFor(admin.id, 'ADMIN');
+    // Q1 upgrade
+    await seedAcctWithChange({ admin, changeType: 'UPGRADE', effectiveDate: new Date('2026-05-15') });
+    // Q3 upgrade — must not appear under Q1
+    await seedAcctWithChange({ admin, changeType: 'UPGRADE', effectiveDate: new Date('2026-11-15'), oldMrr: 70000, newMrr: 90000 });
+
+    const q1 = await authedGet(app, '/dashboard/existing-base?quarter=Q1', token);
+    expect(q1.body.upgrades.count).toBe(1);
+    expect(q1.body.upgrades.arcAddedLakh).toBeCloseTo(1.2, 1);
+
+    const q3 = await authedGet(app, '/dashboard/existing-base?quarter=Q3', token);
+    expect(q3.body.upgrades.count).toBe(1);
+    // (90000 - 70000) * 12 = 240000 = 2.4L
+    expect(q3.body.upgrades.arcAddedLakh).toBeCloseTo(2.4, 1);
+
+    const q2 = await authedGet(app, '/dashboard/existing-base?quarter=Q2', token);
+    expect(q2.body.upgrades.count).toBe(0);
+  });
+
+  it('All Time (no filter) sums every change across the FY', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    const token = await tokenFor(admin.id, 'ADMIN');
+    await seedAcctWithChange({ admin, changeType: 'UPGRADE', effectiveDate: new Date('2026-05-15') });
+    await seedAcctWithChange({ admin, changeType: 'UPGRADE', effectiveDate: new Date('2026-11-15'), oldMrr: 70000, newMrr: 90000 });
+
+    const res = await authedGet(app, '/dashboard/existing-base', token);
+    expect(res.body.upgrades.count).toBe(2);
+    // 1.2L + 2.4L = 3.6L
+    expect(res.body.upgrades.arcAddedLakh).toBeCloseTo(3.6, 1);
+  });
+
+  it('Quarter filter projects current ARC = start + window deltas', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    const token = await tokenFor(admin.id, 'ADMIN');
+    await seedAcctWithChange({ admin, changeType: 'UPGRADE', effectiveDate: new Date('2026-05-15') });
+    // Q1 view: start = 50k * 12 = 6L; +1.2L upgrade → currentArc = 7.2L
+    const q1 = await authedGet(app, '/dashboard/existing-base?quarter=Q1', token);
+    expect(q1.body.totalBaseArcLakh).toBeCloseTo(6, 1);
+    expect(q1.body.currentArcLakh).toBeCloseTo(7.2, 1);
+    // Q2 view: same start, no Q2 deltas → currentArc collapses back to start
+    const q2 = await authedGet(app, '/dashboard/existing-base?quarter=Q2', token);
+    expect(q2.body.totalBaseArcLakh).toBeCloseTo(6, 1);
+    expect(q2.body.currentArcLakh).toBeCloseTo(6, 1);
+  });
+
+  it('rejects invalid quarter param silently (treats as All Time)', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    const token = await tokenFor(admin.id, 'ADMIN');
+    await seedAcctWithChange({ admin, changeType: 'UPGRADE', effectiveDate: new Date('2026-05-15') });
+
+    const res = await authedGet(app, '/dashboard/existing-base?quarter=Q9', token);
+    expect(res.status).toBe(200);
+    expect(res.body.upgrades.count).toBe(1); // counted because filter ignored
+  });
+});

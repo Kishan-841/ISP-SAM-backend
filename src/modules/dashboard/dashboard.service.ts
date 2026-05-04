@@ -64,7 +64,8 @@ export type NewBaseMetrics = {
     companyName: string | null;
     customerCode: string | null;
     onboardingDate: string;
-    currentMrrLakh: number;
+    /** Annualised Recurring Contribution, lakh-denominated. ARC = currentMrr × 12. */
+    currentArcLakh: number;
     contractStatus: string;
   }>;
 };
@@ -389,7 +390,7 @@ export async function computeNewBase(
     companyName: a.companyName,
     customerCode: a.customerCode,
     onboardingDate: a.onboardingDate.toISOString().slice(0, 10),
-    currentMrrLakh: round1(Number(a.currentMrr) / LAKH),
+    currentArcLakh: round1((Number(a.currentMrr) * 12) / LAKH),
     contractStatus: a.contractStatus,
   }));
 

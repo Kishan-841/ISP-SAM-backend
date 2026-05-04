@@ -43,16 +43,20 @@ ENV PORT=5500
 
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
-# Install ONLY production deps (smaller image, smaller attack surface).
+# Install production deps. `prisma` is now in dependencies (not devDeps) so
+# both the CLI (for `prisma migrate deploy` at boot) and the client are
+# present in the runner image.
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --prod --frozen-lockfile
 
-# Bring across the generated Prisma client + compiled JS + prisma schema
-# (prisma migrate deploy at boot needs the schema dir).
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
-COPY --from=builder /app/dist ./dist
+# Bring across the prisma schema + run generate so the client engine is
+# built against THIS image's libc/openssl, not the builder's. Prisma 6
+# emits the generated client into node_modules/@prisma/client.
 COPY --from=builder /app/prisma ./prisma
+RUN pnpm exec prisma generate
+
+# Compiled JS.
+COPY --from=builder /app/dist ./dist
 
 # Uploads directory — bind-mounted as a docker volume in compose so files
 # survive container rebuilds.

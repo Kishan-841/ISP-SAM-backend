@@ -53,11 +53,8 @@ export class CrmHttpClient implements CrmClient {
 
   async listServiceOrders(filters: { customerId: string }): Promise<ServiceOrder[]> {
     const qs = `?customerId=${encodeURIComponent(filters.customerId)}`;
-    const body = await this.request<{ data: ServiceOrder[] } | ServiceOrder[]>(
-      'GET',
-      `/service-orders${qs}`,
-    );
-    return Array.isArray(body) ? body : body.data;
+    const body = await this.request<unknown>('GET', `/service-orders${qs}`);
+    return extractArray<ServiceOrder>(body, ['orders', 'serviceOrders', 'data', 'items']);
   }
 
   async setActivationDate(orderId: string, activationDate: Date): Promise<ServiceOrder> {
@@ -70,11 +67,13 @@ export class CrmHttpClient implements CrmClient {
   }
 
   async fetchDisconnectionReasons(): Promise<DisconnectionCategory[]> {
-    const body = await this.request<{ data: DisconnectionCategory[] } | DisconnectionCategory[]>(
-      'GET',
-      '/service-orders/disconnection-reasons',
-    );
-    return Array.isArray(body) ? body : body.data;
+    const body = await this.request<unknown>('GET', '/service-orders/disconnection-reasons');
+    return extractArray<DisconnectionCategory>(body, [
+      'reasons',
+      'categories',
+      'data',
+      'items',
+    ]);
   }
 
   // ─── internals ─────────────────────────────────────────────────────────
@@ -137,4 +136,40 @@ function parseJson(text: string): unknown {
   } catch {
     return { message: text };
   }
+}
+
+/**
+ * Pull the first array out of a CRM response, regardless of the wrapper key.
+ * CRM endpoints inconsistently use `{ orders: [] }`, `{ data: [] }`,
+ * `{ reasons: [] }`, `{ items: [] }`, etc. Trying common keys keeps us
+ * working without forcing the CRM team to settle on one envelope.
+ *
+ * Returns [] (and logs once) for any unrecognised shape so callers can
+ * keep going instead of throwing — the empty result will surface in the
+ * UI as "no rows" which is harmless and obvious.
+ */
+function extractArray<T>(body: unknown, keys: string[]): T[] {
+  if (Array.isArray(body)) return body as T[];
+  if (body && typeof body === 'object') {
+    const obj = body as Record<string, unknown>;
+    for (const key of keys) {
+      const v = obj[key];
+      if (Array.isArray(v)) return v as T[];
+    }
+    // Sometimes CRM nests one level deeper, e.g. { data: { orders: [...] } }.
+    if (obj.data && typeof obj.data === 'object') {
+      const inner = obj.data as Record<string, unknown>;
+      for (const key of keys) {
+        const v = inner[key];
+        if (Array.isArray(v)) return v as T[];
+      }
+    }
+  }
+  console.warn(
+    '[CrmHttpClient] could not find an array in response; tried keys:',
+    keys,
+    'body:',
+    body,
+  );
+  return [];
 }

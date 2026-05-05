@@ -6,7 +6,7 @@ import type { AuthedRequest } from '../auth/auth.middleware.js';
 
 const bodySchema = z.object({
   accountId: z.string().uuid(),
-  changeType: z.enum(['UPGRADE', 'DOWNGRADE', 'RATE_REVISION', 'TERMINATION']),
+  changeType: z.enum(['UPGRADE', 'DOWNGRADE', 'RATE_REVISION', 'DISCONNECTION']),
   newMrr: z.coerce.number().nonnegative(),
   newBandwidthMbps: z.coerce.number().int().nonnegative().optional(),
   effectiveDate: z.string().refine((s) => !Number.isNaN(Date.parse(s)), 'Invalid date'),
@@ -59,7 +59,7 @@ export const commercialChangesController = {
       return;
     }
     const type = req.query.type as CommercialChangeType | undefined;
-    const allowed: CommercialChangeType[] = ['UPGRADE', 'DOWNGRADE', 'RATE_REVISION', 'TERMINATION'];
+    const allowed: CommercialChangeType[] = ['UPGRADE', 'DOWNGRADE', 'RATE_REVISION', 'DISCONNECTION'];
     if (type && !allowed.includes(type)) {
       res.status(400).json({ error: 'Invalid type' });
       return;

@@ -23,7 +23,7 @@ enum CommercialChangeType {
   UPGRADE
   DOWNGRADE
   RATE_REVISION
-  TERMINATION
+  DISCONNECTION
 }
 
 enum UserRole {
@@ -85,12 +85,33 @@ model CommercialChange {
   reason              String?
   oldBandwidthMbps    Int?     @map("old_bandwidth_mbps")
   newBandwidthMbps    Int?     @map("new_bandwidth_mbps")
+
+  // CRM service-order linkage. Populated after we POST /api/service-orders
+  // on the CRM. Empty when the SAM-side row was created before the CRM
+  // bridge existed, or when the CRM call failed and we kept the row local.
+  crmServiceOrderId          String?   @unique @map("crm_service_order_id")
+  crmOrderNumber             String?   @unique @map("crm_order_number")
+  /// CRM enum value (PENDING_DOCS_REVIEW / PENDING_NOC / ... / COMPLETED).
+  /// Stored as a free String so SAM doesn't need a migration each time
+  /// the CRM workflow gains a new state.
+  crmStatus                  String?   @map("crm_status")
+  crmStatusUpdatedAt         DateTime? @map("crm_status_updated_at") @db.Timestamptz(6)
+  /// Set during the PENDING_SAM_ACTIVATION → PENDING_ACCOUNTS transition
+  /// once the SAM operator collects the billing-start date from the customer.
+  activationDate             DateTime? @map("activation_date") @db.Date
+
+  // Disconnection-specific fields. Populated only when changeType=DISCONNECTION.
+  disconnectionCategoryId    String?   @map("disconnection_category_id")
+  disconnectionSubCategoryId String?   @map("disconnection_sub_category_id")
+  disconnectionReason        String?   @map("disconnection_reason")
+
   createdAt              DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
 
   account Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
 
   @@index([accountId])
   @@index([effectiveDate])
+  @@index([crmStatus])
   @@map("commercial_changes")
 }
 

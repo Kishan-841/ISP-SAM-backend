@@ -124,7 +124,7 @@ describe('POST /commercial-changes', () => {
     expect(audits[0]?.performedBy).toBe(user.id);
   });
 
-  it('TERMINATION: marks account TERMINATED and zeroes MRR', async () => {
+  it('DISCONNECTION: marks account TERMINATED and zeroes MRR', async () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({ clientName: 'GoneCo', currentMrr: 75000 });
 
@@ -132,7 +132,7 @@ describe('POST /commercial-changes', () => {
       .post('/commercial-changes')
       .set('Cookie', cookie)
       .field('accountId', acct.id)
-      .field('changeType', 'TERMINATION')
+      .field('changeType', 'DISCONNECTION')
       .field('newMrr', '0')
       .field('effectiveDate', '2026-05-01')
       .field('reason', 'Customer churn')

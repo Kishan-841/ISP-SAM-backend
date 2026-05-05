@@ -95,7 +95,7 @@ export const leaderboardService = {
 
       const upgradesCount = userChanges.filter((c) => c.changeType === 'UPGRADE').length;
       const downgradesCount = userChanges.filter((c) => c.changeType === 'DOWNGRADE').length;
-      const terminationsCount = userChanges.filter((c) => c.changeType === 'TERMINATION').length;
+      const terminationsCount = userChanges.filter((c) => c.changeType === 'DISCONNECTION').length;
       const expansionDenom = upgradesCount + downgradesCount + terminationsCount;
       const expansionRatio = expansionDenom > 0 ? upgradesCount / expansionDenom : 0;
 

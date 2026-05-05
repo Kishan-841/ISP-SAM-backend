@@ -121,7 +121,7 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     expect(res.body.downgrades.arcReducedLakh).toBeCloseTo(1.2, 1);
   });
 
-  it('aggregates TERMINATION as full ARC lost', async () => {
+  it('aggregates DISCONNECTION as full ARC lost', async () => {
     const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
     const acct = await seedAccount({
       kittyType: 'BASE',
@@ -132,7 +132,7 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     await prisma.commercialChange.create({
       data: {
         accountId: acct.id,
-        changeType: 'TERMINATION',
+        changeType: 'DISCONNECTION',
         oldMrr: 100000,
         newMrr: 0,
         effectiveDate: new Date('2026-04-15'),
@@ -222,7 +222,7 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
 describe('GET /dashboard/existing-base — quarter filter', () => {
   async function seedAcctWithChange(opts: {
     admin: { id: string };
-    changeType: 'UPGRADE' | 'DOWNGRADE' | 'RATE_REVISION' | 'TERMINATION';
+    changeType: 'UPGRADE' | 'DOWNGRADE' | 'RATE_REVISION' | 'DISCONNECTION';
     effectiveDate: Date;
     oldMrr?: number;
     newMrr?: number;

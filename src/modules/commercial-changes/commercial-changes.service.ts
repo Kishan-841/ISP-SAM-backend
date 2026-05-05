@@ -59,7 +59,7 @@ export const commercialChangesService = {
 
     const oldMrr = Number(account.currentMrr);
     const oldBandwidth = account.bandwidthMbps ?? null;
-    const isTermination = input.changeType === 'TERMINATION';
+    const isTermination = input.changeType === 'DISCONNECTION';
 
     // 2. Transaction: create commercial_change, update account, write audit log
     const result = await prisma.$transaction(async (tx) => {

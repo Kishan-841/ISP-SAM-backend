@@ -9,7 +9,7 @@ const TYPE_LABEL: Record<CommercialChangeType, string> = {
   UPGRADE: 'Upgrade',
   DOWNGRADE: 'Downgrade',
   RATE_REVISION: 'Rate Revision',
-  TERMINATION: 'Termination',
+  DISCONNECTION: 'Disconnection',
 };
 
 export function buildAccountsTeamDraft(opts: {

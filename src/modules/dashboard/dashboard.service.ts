@@ -155,7 +155,7 @@ export const dashboardService = {
           rateRevsCount++;
           rateRevsArcChange += (oldM - newM) * 12; // positive magnitude
           break;
-        case 'TERMINATION':
+        case 'DISCONNECTION':
           terminationsCount++;
           terminationsArcLost += oldM * 12;
           break;

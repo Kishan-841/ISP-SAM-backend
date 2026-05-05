@@ -3,6 +3,12 @@ import fs from 'node:fs/promises';
 import type { CommercialChangeType, Prisma, UserRole } from '@prisma/client';
 import { prisma } from '../../prisma.js';
 import { buildAccountsTeamDraft, type EmailDraft } from './notification-bridge.js';
+import {
+  getCrmClient,
+  CrmHttpError,
+  type CreateServiceOrderInput,
+  type ServiceOrderType,
+} from '../../services/integrations/crm/index.js';
 
 export type Requester = { id: string; role: UserRole };
 
@@ -15,6 +21,12 @@ export type CommitInput = {
   reason: string | null;
   approvalFile: { buffer: Buffer; originalName: string };
   performedByUserId: string;
+  // Disconnection-only.
+  disconnectionCategoryId?: string;
+  disconnectionSubCategoryId?: string;
+  disconnectionReason?: string;
+  /** Optional notes forwarded to CRM as `notes` on the service-order request. */
+  notes?: string;
 };
 
 export type CommitResult = {
@@ -26,8 +38,16 @@ export type CommitResult = {
     newMrr: number;
     effectiveDate: string;
     approvalFileUrl: string;
+    crmServiceOrderId: string | null;
+    crmOrderNumber: string | null;
+    crmStatus: string | null;
   };
   emailDraft: EmailDraft;
+  /** Outcome of the CRM service-order call. Null when the CRM bridge is disabled. */
+  crm:
+    | { ok: true; orderId: string; orderNumber: string; status: string }
+    | { ok: false; error: string; status?: number }
+    | { ok: 'disabled' };
 };
 
 const UPLOADS_ROOT = path.resolve(process.cwd(), 'uploads');
@@ -76,6 +96,9 @@ export const commercialChangesService = {
           reason: input.reason,
           oldBandwidthMbps: oldBandwidth,
           newBandwidthMbps: input.newBandwidthMbps,
+          disconnectionCategoryId: input.disconnectionCategoryId ?? null,
+          disconnectionSubCategoryId: input.disconnectionSubCategoryId ?? null,
+          disconnectionReason: input.disconnectionReason ?? null,
         },
       });
 
@@ -109,6 +132,57 @@ export const commercialChangesService = {
       return change;
     });
 
+    // 3. Forward to CRM as a service order (gated by CRM_SERVICE_ORDERS_ENABLED).
+    //    CRM has the multi-team workflow (Docs → NOC → Accounts); SAM just
+    //    fires the create. We persist the returned id + orderNumber + status
+    //    onto the SAM row so the user can track progress and refresh.
+    //
+    //    NOTE: account.currentMrr was already updated optimistically above.
+    //    If CRM rejects the order, the SAM row stays without crmServiceOrderId
+    //    and the SAM operator can manually retry submission later (or undo
+    //    via a fresh commercial change — Phase 2 work).
+    const crmEnabled = process.env.CRM_SERVICE_ORDERS_ENABLED === 'true';
+    let crm: CommitResult['crm'];
+    let crmServiceOrderId: string | null = null;
+    let crmOrderNumber: string | null = null;
+    let crmStatus: string | null = null;
+    if (!crmEnabled) {
+      crm = { ok: 'disabled' };
+    } else if (!account.externalCrmId) {
+      crm = {
+        ok: false,
+        error: 'Account has no externalCrmId — was it imported via the CRM webhook?',
+      };
+    } else {
+      try {
+        const crmInput = buildServiceOrderInput(input, account.externalCrmId);
+        const order = await getCrmClient().createServiceOrder(crmInput);
+        crmServiceOrderId = order.id;
+        crmOrderNumber = order.orderNumber;
+        crmStatus = order.status;
+        await prisma.commercialChange.update({
+          where: { id: result.id },
+          data: {
+            crmServiceOrderId,
+            crmOrderNumber,
+            crmStatus,
+            crmStatusUpdatedAt: new Date(),
+          },
+        });
+        crm = {
+          ok: true,
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+          status: order.status,
+        };
+      } catch (err) {
+        crm =
+          err instanceof CrmHttpError
+            ? { ok: false, error: err.message, status: err.statusCode }
+            : { ok: false, error: err instanceof Error ? err.message : 'CRM call failed' };
+      }
+    }
+
     const emailDraft = buildAccountsTeamDraft({
       account,
       samOwnerName: performingUser.name,
@@ -128,8 +202,12 @@ export const commercialChangesService = {
         newMrr: Number(result.newMrr),
         effectiveDate: result.effectiveDate.toISOString(),
         approvalFileUrl: relativeUrl,
+        crmServiceOrderId,
+        crmOrderNumber,
+        crmStatus,
       },
       emailDraft,
+      crm,
     };
   },
 
@@ -157,4 +235,92 @@ export const commercialChangesService = {
       orderBy: [{ effectiveDate: 'desc' }, { id: 'desc' }],
     });
   },
+
+  /**
+   * Pull the latest CRM-side status for one commercial change and persist it.
+   * Returns the updated row. No-op if the change isn't linked to a CRM order.
+   */
+  async refreshCrmStatus(commercialChangeId: string) {
+    const change = await prisma.commercialChange.findUnique({
+      where: { id: commercialChangeId },
+      include: { account: { select: { externalCrmId: true } } },
+    });
+    if (!change) throw new Error('Commercial change not found');
+    if (!change.crmServiceOrderId || !change.account.externalCrmId) {
+      return change; // nothing to refresh
+    }
+
+    const orders = await getCrmClient().listServiceOrders({
+      customerId: change.account.externalCrmId,
+    });
+    const order = orders.find((o) => o.id === change.crmServiceOrderId);
+    if (!order) return change;
+
+    return prisma.commercialChange.update({
+      where: { id: commercialChangeId },
+      data: {
+        crmStatus: order.status,
+        crmStatusUpdatedAt: new Date(),
+        activationDate: order.activationDate ? new Date(order.activationDate) : null,
+      },
+    });
+  },
+
+  /**
+   * SAM-side action for the PENDING_SAM_ACTIVATION → PENDING_ACCOUNTS
+   * transition. Forwards the date to CRM, then mirrors the new status
+   * (PENDING_ACCOUNTS) onto the SAM row.
+   */
+  async setActivationDate(commercialChangeId: string, activationDate: Date) {
+    const change = await prisma.commercialChange.findUnique({
+      where: { id: commercialChangeId },
+    });
+    if (!change) throw new Error('Commercial change not found');
+    if (!change.crmServiceOrderId) {
+      throw new Error('Commercial change has no CRM service-order to update');
+    }
+    const order = await getCrmClient().setActivationDate(
+      change.crmServiceOrderId,
+      activationDate,
+    );
+    return prisma.commercialChange.update({
+      where: { id: commercialChangeId },
+      data: {
+        crmStatus: order.status,
+        crmStatusUpdatedAt: new Date(),
+        activationDate,
+      },
+    });
+  },
 };
+
+/** Map a SAM CommitInput → the CRM service-order request body. */
+function buildServiceOrderInput(
+  input: CommitInput,
+  externalCrmId: string,
+): CreateServiceOrderInput {
+  const orderType: ServiceOrderType = input.changeType; // names already aligned post-rename
+  const base: CreateServiceOrderInput = {
+    customerId: externalCrmId,
+    orderType,
+  };
+  if (input.notes) base.notes = input.notes;
+
+  if (orderType === 'DISCONNECTION') {
+    if (!input.disconnectionCategoryId || !input.disconnectionSubCategoryId) {
+      throw new Error(
+        'disconnectionCategoryId and disconnectionSubCategoryId are required for DISCONNECTION',
+      );
+    }
+    base.disconnectionCategoryId = input.disconnectionCategoryId;
+    base.disconnectionSubCategoryId = input.disconnectionSubCategoryId;
+    if (input.disconnectionReason) base.disconnectionReason = input.disconnectionReason;
+    return base;
+  }
+
+  // UPGRADE / DOWNGRADE / RATE_REVISION — CRM expects ANNUAL ARC, not monthly.
+  base.newArc = Math.round(input.newMrr * 12);
+  if (input.newBandwidthMbps != null) base.newBandwidth = input.newBandwidthMbps;
+  base.effectiveDate = input.effectiveDate.toISOString();
+  return base;
+}

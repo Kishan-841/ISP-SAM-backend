@@ -136,6 +136,8 @@ describe('POST /commercial-changes', () => {
       .field('newMrr', '0')
       .field('effectiveDate', '2026-05-01')
       .field('reason', 'Customer churn')
+      .field('disconnectionCategoryId', '00000000-0000-0000-0000-000000000001')
+      .field('disconnectionSubCategoryId', '00000000-0000-0000-0000-000000000002')
       .attach('file', PDF_BUFFER, 'termination.pdf');
 
     expect(res.status).toBe(201);
@@ -238,5 +240,195 @@ describe('GET /commercial-changes', () => {
     const res = await request(app).get('/commercial-changes').set('Cookie', cookie);
     expect(res.body.changes).toHaveLength(1);
     expect(res.body.changes[0].account.clientName).toBe('A');
+  });
+});
+
+describe('CRM service-order bridge', () => {
+  beforeEach(async () => {
+    // Reset module cache so getCrmClient() returns a fresh stub each test.
+    const mod = await import('../src/services/integrations/crm/index.js');
+    mod.resetCrmClientCacheForTests();
+    delete process.env.CRM_API_BASE_URL;
+    delete process.env.CRM_SERVICE_EMAIL;
+    delete process.env.CRM_SERVICE_PASSWORD;
+  });
+
+  it('crm.ok=disabled when kill-switch is off', async () => {
+    process.env.CRM_SERVICE_ORDERS_ENABLED = 'false';
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'Acme',
+      currentMrr: 50000,
+      externalCrmId: 'crm-acme-1',
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'UPGRADE')
+      .field('newMrr', '60000')
+      .field('newBandwidthMbps', '200')
+      .field('effectiveDate', '2026-05-01')
+      .attach('file', PDF_BUFFER, 'approval.pdf');
+    expect(res.status).toBe(201);
+    expect(res.body.crm).toEqual({ ok: 'disabled' });
+    expect(res.body.commercialChange.crmServiceOrderId).toBeNull();
+  });
+
+  it('UPGRADE: forwards × 12 ARC + bandwidth to CRM and stores order ref', async () => {
+    process.env.CRM_SERVICE_ORDERS_ENABLED = 'true';
+    const { CrmStub, setCrmClientForTests } = await import(
+      '../src/services/integrations/crm/index.js'
+    );
+    const stub = new CrmStub();
+    setCrmClientForTests(stub);
+
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'Acme',
+      currentMrr: 50000,
+      bandwidthMbps: 100,
+      externalCrmId: 'crm-acme-2',
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'UPGRADE')
+      .field('newMrr', '60000')
+      .field('newBandwidthMbps', '200')
+      .field('effectiveDate', '2026-05-01')
+      .attach('file', PDF_BUFFER, 'approval.pdf');
+    expect(res.status).toBe(201);
+
+    // CRM was called with the right shape — × 12 ARC, customerId = externalCrmId
+    expect(stub.createServiceOrderCalls).toHaveLength(1);
+    const call = stub.createServiceOrderCalls[0]!;
+    expect(call.customerId).toBe('crm-acme-2');
+    expect(call.orderType).toBe('UPGRADE');
+    expect(call.newArc).toBe(720000); // 60000 * 12
+    expect(call.newBandwidth).toBe(200);
+
+    // SAM row stores the CRM linkage
+    expect(res.body.crm.ok).toBe(true);
+    expect(res.body.commercialChange.crmOrderNumber).toMatch(/^SO\/STUB\//);
+    expect(res.body.commercialChange.crmStatus).toBe('PENDING_DOCS_REVIEW');
+  });
+
+  it('DISCONNECTION: forwards category/sub-category, no ARC math', async () => {
+    process.env.CRM_SERVICE_ORDERS_ENABLED = 'true';
+    const { CrmStub, setCrmClientForTests } = await import(
+      '../src/services/integrations/crm/index.js'
+    );
+    const stub = new CrmStub();
+    setCrmClientForTests(stub);
+
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'GoneCo',
+      currentMrr: 75000,
+      externalCrmId: 'crm-gone-1',
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'DISCONNECTION')
+      .field('newMrr', '0')
+      .field('effectiveDate', '2026-05-01')
+      .field('disconnectionCategoryId', 'cat-1')
+      .field('disconnectionSubCategoryId', 'sub-1')
+      .field('disconnectionReason', 'Office closing')
+      .attach('file', PDF_BUFFER, 'disco.pdf');
+    expect(res.status).toBe(201);
+    const call = stub.createServiceOrderCalls[0]!;
+    expect(call.orderType).toBe('DISCONNECTION');
+    expect(call.disconnectionCategoryId).toBe('cat-1');
+    expect(call.disconnectionSubCategoryId).toBe('sub-1');
+    expect(call.disconnectionReason).toBe('Office closing');
+    // No ARC math for DISCONNECTION
+    expect(call.newArc).toBeUndefined();
+    expect(call.newBandwidth).toBeUndefined();
+    expect(res.body.crm.status).toBe('PENDING_APPROVAL');
+  });
+
+  it('surfaces CRM 4xx as crm.ok=false but still saves SAM row', async () => {
+    process.env.CRM_SERVICE_ORDERS_ENABLED = 'true';
+    const { CrmStub, setCrmClientForTests } = await import(
+      '../src/services/integrations/crm/index.js'
+    );
+    const stub = new CrmStub();
+    stub.failNextCreate = { status: 400, message: 'Customer not found' };
+    setCrmClientForTests(stub);
+
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'Bad',
+      currentMrr: 10000,
+      externalCrmId: 'crm-bad-1',
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'UPGRADE')
+      .field('newMrr', '20000')
+      .field('newBandwidthMbps', '200')
+      .field('effectiveDate', '2026-05-01')
+      .attach('file', PDF_BUFFER, 'approval.pdf');
+    // SAM still returns 201 — the row was saved + the file is on disk.
+    expect(res.status).toBe(201);
+    expect(res.body.crm.ok).toBe(false);
+    expect(res.body.crm.status).toBe(400);
+    expect(res.body.crm.error).toMatch(/Customer not found/);
+    // No CRM linkage on the row
+    expect(res.body.commercialChange.crmServiceOrderId).toBeNull();
+
+    // But the SAM row was saved
+    const rows = await prisma.commercialChange.findMany();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.crmServiceOrderId).toBeNull();
+  });
+
+  it('rejects DISCONNECTION without category ids', async () => {
+    process.env.CRM_SERVICE_ORDERS_ENABLED = 'false';
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'X',
+      currentMrr: 10000,
+      externalCrmId: 'crm-x-1',
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'DISCONNECTION')
+      .field('newMrr', '0')
+      .field('effectiveDate', '2026-05-01')
+      .attach('file', PDF_BUFFER, 'disco.pdf');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/disconnectionCategoryId/);
+  });
+
+  it('crm.ok=false when account has no externalCrmId', async () => {
+    process.env.CRM_SERVICE_ORDERS_ENABLED = 'true';
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'NoCrm',
+      currentMrr: 10000,
+      externalCrmId: null,
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'UPGRADE')
+      .field('newMrr', '20000')
+      .field('newBandwidthMbps', '200')
+      .field('effectiveDate', '2026-05-01')
+      .attach('file', PDF_BUFFER, 'approval.pdf');
+    expect(res.status).toBe(201);
+    expect(res.body.crm.ok).toBe(false);
+    expect(res.body.crm.error).toMatch(/externalCrmId/);
   });
 });

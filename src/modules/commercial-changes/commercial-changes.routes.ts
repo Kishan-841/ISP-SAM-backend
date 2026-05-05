@@ -18,6 +18,10 @@ export const commercialChangesRouter = Router();
 commercialChangesRouter.use(requireAuth);
 
 commercialChangesRouter.get('/', commercialChangesController.list);
+commercialChangesRouter.get(
+  '/disconnection-reasons',
+  commercialChangesController.disconnectionReasons,
+);
 
 commercialChangesRouter.post(
   '/',
@@ -32,4 +36,10 @@ commercialChangesRouter.post(
     });
   },
   commercialChangesController.commit,
+);
+
+commercialChangesRouter.post('/:id/refresh-status', commercialChangesController.refreshCrmStatus);
+commercialChangesRouter.post(
+  '/:id/set-activation-date',
+  commercialChangesController.setActivationDate,
 );

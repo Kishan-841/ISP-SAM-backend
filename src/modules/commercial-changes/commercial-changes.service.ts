@@ -155,7 +155,7 @@ export const commercialChangesService = {
       };
     } else {
       try {
-        const crmInput = buildServiceOrderInput(input, account.externalCrmId);
+        const crmInput = buildServiceOrderInput(input, account.externalCrmId, result.id);
         const order = await getCrmClient().createServiceOrder(crmInput);
         crmServiceOrderId = order.id;
         crmOrderNumber = order.orderNumber;
@@ -298,13 +298,18 @@ export const commercialChangesService = {
 function buildServiceOrderInput(
   input: CommitInput,
   externalCrmId: string,
+  samChangeId: string,
 ): CreateServiceOrderInput {
   const orderType: ServiceOrderType = input.changeType; // names already aligned post-rename
   const base: CreateServiceOrderInput = {
     customerId: externalCrmId,
     orderType,
   };
-  if (input.notes) base.notes = input.notes;
+  // Always prefix CRM notes with our internal SAM-XXXXXXXX reference so
+  // support tickets that span the boundary are trivially traceable. The
+  // CRM team explicitly asked for this in their contract notes.
+  const samRef = `SAM-${samChangeId.slice(0, 8).toUpperCase()}`;
+  base.notes = input.notes ? `${samRef} | ${input.notes}` : samRef;
 
   if (orderType === 'DISCONNECTION') {
     if (!input.disconnectionCategoryId || !input.disconnectionSubCategoryId) {

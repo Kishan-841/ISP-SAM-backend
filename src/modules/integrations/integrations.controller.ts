@@ -5,20 +5,29 @@ import type { VerifiedRequest } from './crm-webhook.middleware.js';
 
 const STATUSES = ['PROCESSED', 'DUPLICATE', 'REJECTED', 'FAILED'] as const;
 
-const customerSchema = z.object({
-  externalId: z.string().min(1),
-  companyName: z.string().min(1),
-  contactName: z.string().optional().nullable(),
-  email: z.string().email().optional().nullable(),
-  phone: z.string().optional().nullable(),
-  circuitId: z.string().optional().nullable(),
-  bandwidthMbps: z.number().int().positive().optional().nullable(),
-  currentPlan: z.string().optional().nullable(),
-  currentMrr: z.number().nonnegative(),
-  onboardingDate: z
-    .string()
-    .refine((s) => !Number.isNaN(Date.parse(s)), 'Invalid onboardingDate'),
-});
+const customerSchema = z
+  .object({
+    externalId: z.string().min(1),
+    companyName: z.string().min(1),
+    contactName: z.string().optional().nullable(),
+    email: z.string().email().optional().nullable(),
+    phone: z.string().optional().nullable(),
+    circuitId: z.string().optional().nullable(),
+    bandwidthMbps: z.number().int().positive().optional().nullable(),
+    currentPlan: z.string().optional().nullable(),
+    // Either currentMrr (monthly) OR currentArc (annual) — at least one is
+    // required. CRM started sending currentArc explicitly; we still accept
+    // currentMrr for backwards compatibility with older payloads.
+    currentMrr: z.number().nonnegative().optional(),
+    currentArc: z.number().nonnegative().optional(),
+    onboardingDate: z
+      .string()
+      .refine((s) => !Number.isNaN(Date.parse(s)), 'Invalid onboardingDate'),
+  })
+  .refine(
+    (c) => c.currentMrr !== undefined || c.currentArc !== undefined,
+    { message: 'Either currentMrr or currentArc must be provided', path: ['currentMrr'] },
+  );
 
 const customerActivatedSchema = z.object({
   eventId: z.string().uuid(),

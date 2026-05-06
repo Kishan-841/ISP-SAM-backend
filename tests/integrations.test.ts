@@ -94,6 +94,38 @@ describe('POST /integrations/crm/customer-activated', () => {
       expect(event?.signatureHeader).toBeTruthy();
     });
 
+    it('accepts currentArc (annual) and stores it as currentMrr / 12', async () => {
+      const payload = samplePayload();
+      // Drop currentMrr from the test payload, send currentArc instead.
+      const variant = {
+        ...payload,
+        customer: {
+          ...payload.customer,
+          currentMrr: undefined as unknown as number,
+          currentArc: 600000, // ₹6L/year → ₹50K/month
+        },
+      } as Payload;
+      const res = await postWebhook(variant);
+      expect(res.status).toBe(201);
+      const account = await prisma.account.findUnique({
+        where: { externalCrmId: variant.customer.externalId },
+      });
+      expect(Number(account?.currentMrr)).toBe(50000);
+    });
+
+    it('rejects payload missing both currentMrr and currentArc', async () => {
+      const payload = samplePayload();
+      const variant = {
+        ...payload,
+        customer: {
+          ...payload.customer,
+          currentMrr: undefined as unknown as number,
+        },
+      } as Payload;
+      const res = await postWebhook(variant);
+      expect(res.status).toBe(400);
+    });
+
     it('updates an existing Account on subsequent activation events', async () => {
       const externalId = `lead-${crypto.randomUUID()}`;
       await postWebhook(samplePayload({ externalId, currentMrr: 30000 }));

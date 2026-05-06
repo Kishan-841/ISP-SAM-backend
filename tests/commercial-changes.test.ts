@@ -308,11 +308,44 @@ describe('CRM service-order bridge', () => {
     expect(call.orderType).toBe('UPGRADE');
     expect(call.newArc).toBe(720000); // 60000 * 12
     expect(call.newBandwidth).toBe(200);
+    // SAM internal ticket id is round-tripped via the notes field for
+    // cross-system traceability.
+    expect(call.notes).toMatch(/^SAM-[A-F0-9]{8}$/);
 
     // SAM row stores the CRM linkage
     expect(res.body.crm.ok).toBe(true);
     expect(res.body.commercialChange.crmOrderNumber).toMatch(/^SO\/STUB\//);
     expect(res.body.commercialChange.crmStatus).toBe('PENDING_DOCS_REVIEW');
+  });
+
+  it('preserves user notes alongside the SAM ref in CRM notes', async () => {
+    process.env.CRM_SERVICE_ORDERS_ENABLED = 'true';
+    const { CrmStub, setCrmClientForTests } = await import(
+      '../src/services/integrations/crm/index.js'
+    );
+    const stub = new CrmStub();
+    setCrmClientForTests(stub);
+
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'Acme',
+      currentMrr: 50000,
+      bandwidthMbps: 100,
+      externalCrmId: 'crm-acme-notes',
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'UPGRADE')
+      .field('newMrr', '60000')
+      .field('newBandwidthMbps', '200')
+      .field('effectiveDate', '2026-05-01')
+      .field('notes', 'Customer expanding to add 50 devices')
+      .attach('file', PDF_BUFFER, 'approval.pdf');
+    expect(res.status).toBe(201);
+    const call = stub.createServiceOrderCalls[0]!;
+    expect(call.notes).toMatch(/^SAM-[A-F0-9]{8} \| Customer expanding/);
   });
 
   it('DISCONNECTION: forwards category/sub-category, no ARC math', async () => {

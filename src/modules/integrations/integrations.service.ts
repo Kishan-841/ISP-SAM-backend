@@ -14,10 +14,21 @@ export type CustomerActivatedPayload = {
     circuitId?: string | null;
     bandwidthMbps?: number | null;
     currentPlan?: string | null;
-    currentMrr: number;
+    /** Monthly figure. Optional — payload must provide either currentMrr or currentArc. */
+    currentMrr?: number;
+    /** Annual figure (= currentMrr × 12). Preferred when present. */
+    currentArc?: number;
     onboardingDate: string;
   };
 };
+
+/** Resolve the monthly figure from whichever field the CRM sent. */
+function resolveMonthlyMrr(c: CustomerActivatedPayload['customer']): number {
+  if (typeof c.currentArc === 'number') return c.currentArc / 12;
+  if (typeof c.currentMrr === 'number') return c.currentMrr;
+  // Schema validation should have rejected this, but defend anyway.
+  throw new Error('customer payload missing both currentMrr and currentArc');
+}
 
 export type IngestContext = {
   signatureHeader: string | null;
@@ -83,6 +94,7 @@ export const integrationsService = {
 
     // 2. Upsert the Account.
     const c = payload.customer;
+    const monthlyMrr = resolveMonthlyMrr(c);
     const account = await prisma.account.upsert({
       where: { externalCrmId: c.externalId },
       create: {
@@ -90,7 +102,7 @@ export const integrationsService = {
         companyName: c.companyName,
         kittyType: 'NEW',
         contractStatus: 'ACTIVE',
-        currentMrr: new Prisma.Decimal(c.currentMrr),
+        currentMrr: new Prisma.Decimal(monthlyMrr),
         onboardingDate: new Date(c.onboardingDate),
         externalCrmId: c.externalId,
         email: c.email ?? null,
@@ -102,7 +114,7 @@ export const integrationsService = {
       update: {
         companyName: c.companyName,
         clientName: c.contactName?.trim() || c.companyName,
-        currentMrr: new Prisma.Decimal(c.currentMrr),
+        currentMrr: new Prisma.Decimal(monthlyMrr),
         email: c.email ?? null,
         mobileNumber: c.phone ?? null,
         currentPlan: c.currentPlan ?? null,

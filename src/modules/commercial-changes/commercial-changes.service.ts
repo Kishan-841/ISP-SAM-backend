@@ -1,5 +1,4 @@
-import path from 'node:path';
-import fs from 'node:fs/promises';
+import crypto from 'node:crypto';
 import type { CommercialChangeType, Prisma, UserRole } from '@prisma/client';
 import { prisma } from '../../prisma.js';
 import { buildAccountsTeamDraft, type EmailDraft } from './notification-bridge.js';
@@ -9,6 +8,7 @@ import {
   type CreateServiceOrderInput,
   type ServiceOrderType,
 } from '../../services/integrations/crm/index.js';
+import { getApprovalFileUploader } from '../../services/storage/cloudinary-storage.js';
 
 export type Requester = { id: string; role: UserRole };
 
@@ -38,6 +38,7 @@ export type CommitResult = {
     newMrr: number;
     effectiveDate: string;
     approvalFileUrl: string;
+    approvalFilePublicId: string | null;
     crmServiceOrderId: string | null;
     crmOrderNumber: string | null;
     crmStatus: string | null;
@@ -49,8 +50,6 @@ export type CommitResult = {
     | { ok: false; error: string; status?: number }
     | { ok: 'disabled' };
 };
-
-const UPLOADS_ROOT = path.resolve(process.cwd(), 'uploads');
 
 export const commercialChangesService = {
   async commit(input: CommitInput): Promise<CommitResult> {
@@ -68,14 +67,18 @@ export const commercialChangesService = {
       throw new Error('Authenticated user not found');
     }
 
-    // 1. Persist the file to disk under uploads/<accountId>/
-    const accountDir = path.join(UPLOADS_ROOT, input.accountId);
-    await fs.mkdir(accountDir, { recursive: true });
-    const safeName = input.approvalFile.originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const filename = `${Date.now()}-${safeName}`;
-    const fullPath = path.join(accountDir, filename);
-    await fs.writeFile(fullPath, input.approvalFile.buffer);
-    const relativeUrl = path.posix.join('uploads', input.accountId, filename);
+    // Pre-generate the commercial-change UUID so the Cloudinary folder path
+    // can include it. Lets us upload BEFORE writing the row, so a failed
+    // upload doesn't leave a half-baked DB row. (Orphan Cloudinary files
+    // from a failed transaction are cheap; orphan DB rows confuse audit.)
+    const commercialChangeId = crypto.randomUUID();
+
+    // 1. Upload approval file to Cloudinary (raw resource).
+    const uploaded = await getApprovalFileUploader().uploadApprovalFile({
+      buffer: input.approvalFile.buffer,
+      originalName: input.approvalFile.originalName,
+      commercialChangeId,
+    });
 
     const oldMrr = Number(account.currentMrr);
     const oldBandwidth = account.bandwidthMbps ?? null;
@@ -85,13 +88,15 @@ export const commercialChangesService = {
     const result = await prisma.$transaction(async (tx) => {
       const change = await tx.commercialChange.create({
         data: {
+          id: commercialChangeId,
           accountId: input.accountId,
           changeType: input.changeType,
           oldMrr,
           newMrr: input.newMrr,
           effectiveDate: input.effectiveDate,
           clientApprovalAttached: true,
-          approvalFileUrl: relativeUrl,
+          approvalFileUrl: uploaded.secureUrl,
+          approvalFilePublicId: uploaded.publicId,
           createdBy: input.performedByUserId,
           reason: input.reason,
           oldBandwidthMbps: oldBandwidth,
@@ -124,7 +129,8 @@ export const commercialChangesService = {
             oldMrr,
             newMrr: input.newMrr,
             effectiveDate: input.effectiveDate.toISOString(),
-            approvalFileUrl: relativeUrl,
+            approvalFileUrl: uploaded.secureUrl,
+            approvalFilePublicId: uploaded.publicId,
           },
         },
       });
@@ -155,7 +161,12 @@ export const commercialChangesService = {
       };
     } else {
       try {
-        const crmInput = buildServiceOrderInput(input, account.externalCrmId, result.id);
+        const crmInput = buildServiceOrderInput(
+          input,
+          account.externalCrmId,
+          result.id,
+          uploaded.secureUrl,
+        );
         const order = await getCrmClient().createServiceOrder(crmInput);
         crmServiceOrderId = order.id;
         crmOrderNumber = order.orderNumber;
@@ -201,7 +212,8 @@ export const commercialChangesService = {
         oldMrr: Number(result.oldMrr),
         newMrr: Number(result.newMrr),
         effectiveDate: result.effectiveDate.toISOString(),
-        approvalFileUrl: relativeUrl,
+        approvalFileUrl: uploaded.secureUrl,
+        approvalFilePublicId: uploaded.publicId,
         crmServiceOrderId,
         crmOrderNumber,
         crmStatus,
@@ -299,11 +311,15 @@ function buildServiceOrderInput(
   input: CommitInput,
   externalCrmId: string,
   samChangeId: string,
+  approvalFileUrl: string,
 ): CreateServiceOrderInput {
   const orderType: ServiceOrderType = input.changeType; // names already aligned post-rename
   const base: CreateServiceOrderInput = {
     customerId: externalCrmId,
     orderType,
+    // Cloudinary HTTPS URL to the customer-approval file (PDF / EML / MSG).
+    // The CRM Docs review UI renders this as a "View customer approval" link.
+    approvalFileUrl,
   };
   // Always prefix CRM notes with our internal SAM-XXXXXXXX reference so
   // support tickets that span the boundary are trivially traceable. The

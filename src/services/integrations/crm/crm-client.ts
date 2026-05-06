@@ -24,6 +24,12 @@ export interface CreateServiceOrderInput {
   /** ISO 8601. Optional. Not used for DISCONNECTION (CRM auto +30 days). */
   effectiveDate?: string;
   notes?: string;
+  /**
+   * HTTPS URL to the customer-approval file in Cloudinary. Optional today
+   * for backwards compatibility — the CRM team's contract makes it required
+   * once their Docs review UI surfaces it.
+   */
+  approvalFileUrl?: string;
   // Disconnection-only.
   disconnectionCategoryId?: string;
   disconnectionSubCategoryId?: string;

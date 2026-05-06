@@ -79,7 +79,12 @@ model CommercialChange {
   newMrr                 Decimal              @map("new_mrr") @db.Decimal(12, 2)
   effectiveDate          DateTime             @map("effective_date") @db.Date
   clientApprovalAttached Boolean              @map("client_approval_attached")
+  /// HTTPS URL to the approval file. Used to be a relative path on the SAM
+  /// container's local disk (uploads/<accountId>/...). Now a Cloudinary
+  /// secure_url after the storage migration.
   approvalFileUrl        String?              @map("approval_file_url")
+  /// Cloudinary public_id — kept for forensic re-fetch / deletion.
+  approvalFilePublicId   String?              @map("approval_file_public_id")
   accountsNotifiedDate   DateTime?            @map("accounts_notified_date") @db.Timestamptz(6)
   createdBy              String               @map("created_by") @db.Uuid
   reason              String?

@@ -14,6 +14,9 @@ importers:
       bcryptjs:
         specifier: ^3.0.3
         version: 3.0.3
+      cloudinary:
+        specifier: ^2.10.0
+        version: 2.10.0
       cookie-parser:
         specifier: ^1.4.7
         version: 1.4.7
@@ -708,6 +711,10 @@ packages:
   citty@0.2.2:
     resolution: {integrity: sha512-+6vJA3L98yv+IdfKGZHBNiGW5KHn22e/JwID0Strsz8h4S/csAu/OuICwxrg44k5MRiZHWIo8XXuJgQTriRP4w==}
 
+  cloudinary@2.10.0:
+    resolution: {integrity: sha512-sY09kYg7wprkndAOjZBAYqFZqwL+SxnEGcAvksOvFA+5upnFn949UjkEkHKNSwkBtW/xRDd0p6NgbSXZcxkI3w==}
+    engines: {node: '>=9'}
+
   codepage@1.15.0:
     resolution: {integrity: sha512-3g6NUTPd/YtuuGrhMnOMRjFc+LJw/bnMp3+0r/Wcz3IXUuCosKRJvMphm5+Q+bvTVGcJJuRvVLuYba+WojaFaA==}
     engines: {node: '>=0.8'}
@@ -965,6 +972,9 @@ packages:
 
   jose@6.2.3:
     resolution: {integrity: sha512-YYVDInQKFJfR/xa3ojUTl8c2KoTwiL1R5Wg9YCydwH0x0B9grbzlg5HC7mMjCtUJjbQ/YnGEZIhI5tCgfTb4Hw==}
+
+  lodash@4.18.1:
+    resolution: {integrity: sha512-dMInicTPVE8d1e5otfwmmjlxkZoUpiVLwyeTdUsi/Caj/gfzzblBcCE5sRHV/AsjuCmxWrte2TNGSYuCeCq+0Q==}
 
   loupe@3.2.1:
     resolution: {integrity: sha512-CdzqowRJCeLU72bHvWqwRBBlLcMEtIvGrlvef74kMnV2AolS9Y8xUv1I0U/MNAWMhBlKIoyuEgoJ0t/bbwHbLQ==}
@@ -1815,6 +1825,10 @@ snapshots:
 
   citty@0.2.2: {}
 
+  cloudinary@2.10.0:
+    dependencies:
+      lodash: 4.18.1
+
   codepage@1.15.0: {}
 
   combined-stream@1.0.8:
@@ -2118,6 +2132,8 @@ snapshots:
   jiti@2.6.1: {}
 
   jose@6.2.3: {}
+
+  lodash@4.18.1: {}
 
   loupe@3.2.1: {}
 

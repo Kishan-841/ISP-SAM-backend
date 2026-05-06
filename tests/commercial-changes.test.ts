@@ -5,6 +5,34 @@ import { resetDb, seedAccount, seedUser } from './helpers/db.js';
 import { tokenFor } from './helpers/auth.js';
 import { SESSION_COOKIE } from '../src/lib/jwt.js';
 import { prisma } from '../src/prisma.js';
+import {
+  setApprovalFileUploaderForTests,
+  type ApprovalFileUploader,
+  type ApprovalUploadInput,
+} from '../src/services/storage/cloudinary-storage.js';
+
+/**
+ * In-memory uploader stub. Tests can read `.uploads` to assert upload
+ * happened with the expected args. Returns a deterministic Cloudinary-like
+ * URL so assertions on the URL shape stay readable.
+ */
+class FakeApprovalUploader implements ApprovalFileUploader {
+  uploads: ApprovalUploadInput[] = [];
+  async uploadApprovalFile(input: ApprovalUploadInput) {
+    this.uploads.push(input);
+    const safe = input.originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const publicId = `sam-software/po-and-mail-acceptance/${input.commercialChangeId}/test-${safe}`;
+    return {
+      publicId,
+      secureUrl: `https://res.cloudinary.com/test-cloud/raw/upload/v1/${publicId}`,
+      bytes: input.buffer.byteLength,
+      format: null,
+      originalFilename: input.originalName,
+    };
+  }
+}
+
+let fakeUploader: FakeApprovalUploader;
 
 beforeAll(() => {
   process.env.JWT_SECRET = 'test-secret-min-32-characters-long-aaa';
@@ -12,6 +40,8 @@ beforeAll(() => {
 
 beforeEach(async () => {
   await resetDb();
+  fakeUploader = new FakeApprovalUploader();
+  setApprovalFileUploaderForTests(fakeUploader);
 });
 
 async function adminCookie() {
@@ -107,7 +137,11 @@ describe('POST /commercial-changes', () => {
     expect(res.body.commercialChange.changeType).toBe('UPGRADE');
     expect(res.body.commercialChange.oldMrr).toBe(50000);
     expect(res.body.commercialChange.newMrr).toBe(60000);
-    expect(res.body.commercialChange.approvalFileUrl).toMatch(/^uploads\//);
+    expect(res.body.commercialChange.approvalFileUrl).toMatch(/^https:\/\/res\.cloudinary\.com\//);
+    expect(res.body.commercialChange.approvalFilePublicId).toMatch(/^sam-software\/po-and-mail-acceptance\//);
+    // Uploader was actually invoked.
+    expect(fakeUploader.uploads).toHaveLength(1);
+    expect(fakeUploader.uploads[0]?.originalName).toBe('approval.pdf');
     expect(res.body.emailDraft.subject).toContain('Acme');
     expect(res.body.emailDraft.body).toContain('Old MRR:');
 
@@ -346,6 +380,42 @@ describe('CRM service-order bridge', () => {
     expect(res.status).toBe(201);
     const call = stub.createServiceOrderCalls[0]!;
     expect(call.notes).toMatch(/^SAM-[A-F0-9]{8} \| Customer expanding/);
+  });
+
+  it('forwards Cloudinary approval URL to CRM as approvalFileUrl', async () => {
+    process.env.CRM_SERVICE_ORDERS_ENABLED = 'true';
+    const { CrmStub, setCrmClientForTests } = await import(
+      '../src/services/integrations/crm/index.js'
+    );
+    const stub = new CrmStub();
+    setCrmClientForTests(stub);
+
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'Acme',
+      currentMrr: 50000,
+      bandwidthMbps: 100,
+      externalCrmId: 'crm-acme-cloudinary',
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'UPGRADE')
+      .field('newMrr', '60000')
+      .field('newBandwidthMbps', '200')
+      .field('effectiveDate', '2026-05-01')
+      .attach('file', PDF_BUFFER, 'customer_approval.pdf');
+    expect(res.status).toBe(201);
+
+    const call = stub.createServiceOrderCalls[0]!;
+    expect(call.approvalFileUrl).toMatch(/^https:\/\/res\.cloudinary\.com\//);
+    expect(call.approvalFileUrl).toContain('customer_approval.pdf');
+
+    // The same URL is persisted on the SAM-side row + audit log.
+    const row = await prisma.commercialChange.findUnique({ where: { id: res.body.commercialChange.id } });
+    expect(row?.approvalFileUrl).toBe(call.approvalFileUrl);
+    expect(row?.approvalFilePublicId).toMatch(/^sam-software\/po-and-mail-acceptance\//);
   });
 
   it('DISCONNECTION: forwards category/sub-category, no ARC math', async () => {

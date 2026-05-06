@@ -58,9 +58,8 @@ RUN pnpm exec prisma generate
 # Compiled JS.
 COPY --from=builder /app/dist ./dist
 
-# Uploads directory — bind-mounted as a docker volume in compose so files
-# survive container rebuilds.
-RUN mkdir -p /app/uploads && chown -R node:node /app
+# Approval files moved to Cloudinary; no local /app/uploads volume needed.
+RUN chown -R node:node /app
 
 # Boot script: applies pending migrations, then starts the server.
 COPY --chown=node:node docker/entrypoint.sh ./entrypoint.sh

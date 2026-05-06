@@ -44,13 +44,10 @@ services:
       DATABASE_URL: postgresql://sam_user:${POSTGRES_PASSWORD}@db:5432/sam?schema=public
       PORT: 5500
       NODE_ENV: production
-    volumes:
-      # Persist commercial-change approval PDFs across container rebuilds.
-      - sam_uploads:/app/uploads
     depends_on:
       db:
         condition: service_healthy
 
 volumes:
   pgdata:
-  sam_uploads:
+  # sam_uploads volume removed — approval files now live in Cloudinary.

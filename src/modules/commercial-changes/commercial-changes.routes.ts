@@ -10,7 +10,7 @@ const upload = multer({
     const allowed = ['.eml', '.msg', '.pdf'];
     const ext = (file.originalname.match(/\.[^.]+$/) ?? [''])[0].toLowerCase();
     if (allowed.includes(ext)) cb(null, true);
-    else cb(new Error('Approval must be .eml, .msg or .pdf'));
+    else cb(new Error('Attachments must be .eml, .msg or .pdf'));
   },
 });
 
@@ -25,9 +25,13 @@ commercialChangesRouter.get(
 
 commercialChangesRouter.post(
   '/',
-  // Multer error → translate into 422 (matches the hard-gate semantics)
+  // Multer error → translate into 422 (matches the hard-gate semantics).
+  // Two named files: approvalFile (client approval) + poFile (Purchase Order).
   (req, res, next) => {
-    upload.single('file')(req, res, (err) => {
+    upload.fields([
+      { name: 'approvalFile', maxCount: 1 },
+      { name: 'poFile', maxCount: 1 },
+    ])(req, res, (err) => {
       if (err) {
         res.status(422).json({ error: err.message });
         return;

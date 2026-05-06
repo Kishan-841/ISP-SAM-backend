@@ -30,6 +30,11 @@ export interface CreateServiceOrderInput {
    * once their Docs review UI surfaces it.
    */
   approvalFileUrl?: string;
+  /**
+   * HTTPS URL to the customer's Purchase Order (PO) in Cloudinary.
+   * Same Cloudinary folder, different `kind` sub-folder.
+   */
+  poFileUrl?: string;
   // Disconnection-only.
   disconnectionCategoryId?: string;
   disconnectionSubCategoryId?: string;

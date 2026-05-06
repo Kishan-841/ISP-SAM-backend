@@ -1,16 +1,21 @@
 import { v2 as cloudinary, type UploadApiResponse } from 'cloudinary';
 
 /**
- * Cloudinary-backed storage for commercial-change approval files
- * (PDF / EML / MSG). Mirrors the CRM-side credentials.
+ * Cloudinary-backed storage for commercial-change attachments
+ * (approval files + POs — PDF / EML / MSG). Mirrors the CRM-side credentials.
  *
  * Resource type is `raw` because these are non-image documents — Cloudinary
  * stores them as-is, no transcoding. The folder structure is intentionally
  * deep so the UI / Docs reviewer can tell at a glance which commercial change
- * a file belongs to:
+ * a file belongs to and which kind of document it is:
  *
- *   sam-software/po-and-mail-acceptance/<commercialChangeId>/<timestamp>-<filename>
+ *   sam-software/po-and-mail-acceptance/<commercialChangeId>/<kind>/<timestamp>-<filename>
+ *
+ *   <kind> ∈ { 'approval', 'po' }
  */
+
+/** Document type — determines the sub-folder under each commercial change. */
+export type AttachmentKind = 'approval' | 'po';
 
 export type UploadedApprovalFile = {
   publicId: string;
@@ -24,6 +29,7 @@ export type ApprovalUploadInput = {
   buffer: Buffer;
   originalName: string;
   commercialChangeId: string;
+  kind: AttachmentKind;
 };
 
 /** The contract the commercial-changes service depends on. Mockable in tests. */
@@ -59,8 +65,8 @@ class CloudinaryUploader implements ApprovalFileUploader {
 
     const safeName = input.originalName
       .replace(/[^a-zA-Z0-9._-]/g, '_')
-      .slice(0, 120) || 'approval';
-    const folder = `${APPROVAL_FOLDER_BASE}/${input.commercialChangeId}`;
+      .slice(0, 120) || input.kind;
+    const folder = `${APPROVAL_FOLDER_BASE}/${input.commercialChangeId}/${input.kind}`;
     // For raw resources, Cloudinary uses the public_id verbatim — including
     // the file extension. We prefix with timestamp to avoid collisions if
     // the same change uploads multiple files in test scenarios.

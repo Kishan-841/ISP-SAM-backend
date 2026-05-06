@@ -20,6 +20,7 @@ export type CommitInput = {
   effectiveDate: Date;
   reason: string | null;
   approvalFile: { buffer: Buffer; originalName: string };
+  poFile: { buffer: Buffer; originalName: string };
   performedByUserId: string;
   // Disconnection-only.
   disconnectionCategoryId?: string;
@@ -39,6 +40,8 @@ export type CommitResult = {
     effectiveDate: string;
     approvalFileUrl: string;
     approvalFilePublicId: string | null;
+    poFileUrl: string;
+    poFilePublicId: string | null;
     crmServiceOrderId: string | null;
     crmOrderNumber: string | null;
     crmStatus: string | null;
@@ -73,12 +76,23 @@ export const commercialChangesService = {
     // from a failed transaction are cheap; orphan DB rows confuse audit.)
     const commercialChangeId = crypto.randomUUID();
 
-    // 1. Upload approval file to Cloudinary (raw resource).
-    const uploaded = await getApprovalFileUploader().uploadApprovalFile({
-      buffer: input.approvalFile.buffer,
-      originalName: input.approvalFile.originalName,
-      commercialChangeId,
-    });
+    // 1. Upload BOTH attachments to Cloudinary in parallel.
+    //    Folder layout: sam-software/po-and-mail-acceptance/<id>/<kind>/<filename>
+    const uploader = getApprovalFileUploader();
+    const [approvalUpload, poUpload] = await Promise.all([
+      uploader.uploadApprovalFile({
+        buffer: input.approvalFile.buffer,
+        originalName: input.approvalFile.originalName,
+        commercialChangeId,
+        kind: 'approval',
+      }),
+      uploader.uploadApprovalFile({
+        buffer: input.poFile.buffer,
+        originalName: input.poFile.originalName,
+        commercialChangeId,
+        kind: 'po',
+      }),
+    ]);
 
     const oldMrr = Number(account.currentMrr);
     const oldBandwidth = account.bandwidthMbps ?? null;
@@ -95,8 +109,10 @@ export const commercialChangesService = {
           newMrr: input.newMrr,
           effectiveDate: input.effectiveDate,
           clientApprovalAttached: true,
-          approvalFileUrl: uploaded.secureUrl,
-          approvalFilePublicId: uploaded.publicId,
+          approvalFileUrl: approvalUpload.secureUrl,
+          approvalFilePublicId: approvalUpload.publicId,
+          poFileUrl: poUpload.secureUrl,
+          poFilePublicId: poUpload.publicId,
           createdBy: input.performedByUserId,
           reason: input.reason,
           oldBandwidthMbps: oldBandwidth,
@@ -129,8 +145,10 @@ export const commercialChangesService = {
             oldMrr,
             newMrr: input.newMrr,
             effectiveDate: input.effectiveDate.toISOString(),
-            approvalFileUrl: uploaded.secureUrl,
-            approvalFilePublicId: uploaded.publicId,
+            approvalFileUrl: approvalUpload.secureUrl,
+            approvalFilePublicId: approvalUpload.publicId,
+            poFileUrl: poUpload.secureUrl,
+            poFilePublicId: poUpload.publicId,
           },
         },
       });
@@ -165,7 +183,8 @@ export const commercialChangesService = {
           input,
           account.externalCrmId,
           result.id,
-          uploaded.secureUrl,
+          approvalUpload.secureUrl,
+          poUpload.secureUrl,
         );
         const order = await getCrmClient().createServiceOrder(crmInput);
         crmServiceOrderId = order.id;
@@ -212,8 +231,10 @@ export const commercialChangesService = {
         oldMrr: Number(result.oldMrr),
         newMrr: Number(result.newMrr),
         effectiveDate: result.effectiveDate.toISOString(),
-        approvalFileUrl: uploaded.secureUrl,
-        approvalFilePublicId: uploaded.publicId,
+        approvalFileUrl: approvalUpload.secureUrl,
+        approvalFilePublicId: approvalUpload.publicId,
+        poFileUrl: poUpload.secureUrl,
+        poFilePublicId: poUpload.publicId,
         crmServiceOrderId,
         crmOrderNumber,
         crmStatus,
@@ -312,14 +333,16 @@ function buildServiceOrderInput(
   externalCrmId: string,
   samChangeId: string,
   approvalFileUrl: string,
+  poFileUrl: string,
 ): CreateServiceOrderInput {
   const orderType: ServiceOrderType = input.changeType; // names already aligned post-rename
   const base: CreateServiceOrderInput = {
     customerId: externalCrmId,
     orderType,
-    // Cloudinary HTTPS URL to the customer-approval file (PDF / EML / MSG).
-    // The CRM Docs review UI renders this as a "View customer approval" link.
+    // Cloudinary HTTPS URLs to the supporting documents — both rendered as
+    // links on the CRM Docs review UI.
     approvalFileUrl,
+    poFileUrl,
   };
   // Always prefix CRM notes with our internal SAM-XXXXXXXX reference so
   // support tickets that span the boundary are trivially traceable. The

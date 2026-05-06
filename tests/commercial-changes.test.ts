@@ -60,7 +60,7 @@ describe('POST /commercial-changes', () => {
       .field('changeType', 'UPGRADE')
       .field('newMrr', '60000')
       .field('effectiveDate', '2026-05-01')
-      .attach('file', PDF_BUFFER, 'approval.pdf');
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(401);
   });
 
@@ -87,7 +87,7 @@ describe('POST /commercial-changes', () => {
       .field('changeType', 'UPGRADE')
       .field('newMrr', '60000')
       .field('effectiveDate', '2026-05-01')
-      .attach('file', PDF_BUFFER, 'approval.pdf');
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(400);
   });
 
@@ -100,7 +100,7 @@ describe('POST /commercial-changes', () => {
       .field('changeType', 'UPGRADE')
       .field('newMrr', '60000')
       .field('effectiveDate', '2026-05-01')
-      .attach('file', PDF_BUFFER, 'approval.pdf');
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(404);
   });
 
@@ -114,8 +114,38 @@ describe('POST /commercial-changes', () => {
       .field('changeType', 'UPGRADE')
       .field('newMrr', '60000')
       .field('effectiveDate', '2026-05-01')
-      .attach('file', PDF_BUFFER, 'approval.txt');
+      .attach('approvalFile', PDF_BUFFER, 'approval.txt');
     expect(res.status).toBe(422);
+  });
+
+  it('422 when poFile is missing (PO is mandatory)', async () => {
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({ clientName: 'Acme', currentMrr: 50000 });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'UPGRADE')
+      .field('newMrr', '60000')
+      .field('effectiveDate', '2026-05-01')
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf');
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/Purchase Order/i);
+  });
+
+  it('422 when approvalFile is missing (approval is mandatory)', async () => {
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({ clientName: 'Acme', currentMrr: 50000 });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'UPGRADE')
+      .field('newMrr', '60000')
+      .field('effectiveDate', '2026-05-01')
+      .attach('poFile', PDF_BUFFER, 'po.pdf');
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/approval/i);
   });
 
   it('UPGRADE: persists, updates account MRR, writes audit log, returns email draft', async () => {
@@ -131,7 +161,7 @@ describe('POST /commercial-changes', () => {
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
       .field('reason', 'Customer capacity expansion')
-      .attach('file', PDF_BUFFER, 'approval.pdf');
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
 
     expect(res.status).toBe(201);
     expect(res.body.commercialChange.changeType).toBe('UPGRADE');
@@ -139,9 +169,14 @@ describe('POST /commercial-changes', () => {
     expect(res.body.commercialChange.newMrr).toBe(60000);
     expect(res.body.commercialChange.approvalFileUrl).toMatch(/^https:\/\/res\.cloudinary\.com\//);
     expect(res.body.commercialChange.approvalFilePublicId).toMatch(/^sam-software\/po-and-mail-acceptance\//);
-    // Uploader was actually invoked.
-    expect(fakeUploader.uploads).toHaveLength(1);
-    expect(fakeUploader.uploads[0]?.originalName).toBe('approval.pdf');
+    // Uploader was invoked twice — once for approval, once for PO — both
+    // under the same commercialChangeId folder (different `kind` sub-folder).
+    expect(fakeUploader.uploads).toHaveLength(2);
+    const approvalCall = fakeUploader.uploads.find((u) => u.kind === 'approval');
+    const poCall = fakeUploader.uploads.find((u) => u.kind === 'po');
+    expect(approvalCall?.originalName).toBe('approval.pdf');
+    expect(poCall?.originalName).toBe('po.pdf');
+    expect(approvalCall?.commercialChangeId).toBe(poCall?.commercialChangeId);
     expect(res.body.emailDraft.subject).toContain('Acme');
     expect(res.body.emailDraft.body).toContain('Old MRR:');
 
@@ -172,7 +207,7 @@ describe('POST /commercial-changes', () => {
       .field('reason', 'Customer churn')
       .field('disconnectionCategoryId', '00000000-0000-0000-0000-000000000001')
       .field('disconnectionSubCategoryId', '00000000-0000-0000-0000-000000000002')
-      .attach('file', PDF_BUFFER, 'termination.pdf');
+      .attach('approvalFile', PDF_BUFFER, 'termination.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
 
     expect(res.status).toBe(201);
     const after = await prisma.account.findUnique({ where: { id: acct.id } });
@@ -191,7 +226,7 @@ describe('POST /commercial-changes', () => {
       .field('changeType', 'DOWNGRADE')
       .field('newMrr', '40000')
       .field('effectiveDate', '2026-05-01')
-      .attach('file', PDF_BUFFER, 'approval.pdf');
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
 
     expect(res.status).toBe(201);
     expect(res.body.commercialChange.oldMrr).toBe(50000);
@@ -303,7 +338,7 @@ describe('CRM service-order bridge', () => {
       .field('newMrr', '60000')
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
-      .attach('file', PDF_BUFFER, 'approval.pdf');
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(201);
     expect(res.body.crm).toEqual({ ok: 'disabled' });
     expect(res.body.commercialChange.crmServiceOrderId).toBeNull();
@@ -332,7 +367,7 @@ describe('CRM service-order bridge', () => {
       .field('newMrr', '60000')
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
-      .attach('file', PDF_BUFFER, 'approval.pdf');
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(201);
 
     // CRM was called with the right shape — × 12 ARC, customerId = externalCrmId
@@ -376,7 +411,7 @@ describe('CRM service-order bridge', () => {
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
       .field('notes', 'Customer expanding to add 50 devices')
-      .attach('file', PDF_BUFFER, 'approval.pdf');
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(201);
     const call = stub.createServiceOrderCalls[0]!;
     expect(call.notes).toMatch(/^SAM-[A-F0-9]{8} \| Customer expanding/);
@@ -405,7 +440,7 @@ describe('CRM service-order bridge', () => {
       .field('newMrr', '60000')
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
-      .attach('file', PDF_BUFFER, 'customer_approval.pdf');
+      .attach('approvalFile', PDF_BUFFER, 'customer_approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(201);
 
     const call = stub.createServiceOrderCalls[0]!;
@@ -442,7 +477,7 @@ describe('CRM service-order bridge', () => {
       .field('disconnectionCategoryId', 'cat-1')
       .field('disconnectionSubCategoryId', 'sub-1')
       .field('disconnectionReason', 'Office closing')
-      .attach('file', PDF_BUFFER, 'disco.pdf');
+      .attach('approvalFile', PDF_BUFFER, 'disco.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(201);
     const call = stub.createServiceOrderCalls[0]!;
     expect(call.orderType).toBe('DISCONNECTION');
@@ -478,7 +513,7 @@ describe('CRM service-order bridge', () => {
       .field('newMrr', '20000')
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
-      .attach('file', PDF_BUFFER, 'approval.pdf');
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     // SAM still returns 201 — the row was saved + the file is on disk.
     expect(res.status).toBe(201);
     expect(res.body.crm.ok).toBe(false);
@@ -508,7 +543,7 @@ describe('CRM service-order bridge', () => {
       .field('changeType', 'DISCONNECTION')
       .field('newMrr', '0')
       .field('effectiveDate', '2026-05-01')
-      .attach('file', PDF_BUFFER, 'disco.pdf');
+      .attach('approvalFile', PDF_BUFFER, 'disco.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/disconnectionCategoryId/);
   });
@@ -529,7 +564,7 @@ describe('CRM service-order bridge', () => {
       .field('newMrr', '20000')
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
-      .attach('file', PDF_BUFFER, 'approval.pdf');
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(201);
     expect(res.body.crm.ok).toBe(false);
     expect(res.body.crm.error).toMatch(/externalCrmId/);

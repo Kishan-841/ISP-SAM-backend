@@ -32,9 +32,19 @@ export const commercialChangesController = {
       return;
     }
 
-    const file = (req as AuthedRequest & { file?: { buffer: Buffer; originalname?: string } }).file;
-    if (!file) {
+    // multer.fields() puts uploaded files under req.files keyed by field name.
+    type UploadedFile = { buffer: Buffer; originalname?: string };
+    const files = (
+      req as AuthedRequest & { files?: Record<string, UploadedFile[] | undefined> }
+    ).files;
+    const approvalFile = files?.approvalFile?.[0];
+    const poFile = files?.poFile?.[0];
+    if (!approvalFile) {
       res.status(422).json({ error: 'Client approval email is mandatory' });
+      return;
+    }
+    if (!poFile) {
+      res.status(422).json({ error: 'Purchase Order (PO) is mandatory' });
       return;
     }
 
@@ -62,7 +72,14 @@ export const commercialChangesController = {
         newBandwidthMbps: parse.data.newBandwidthMbps ?? null,
         effectiveDate: new Date(parse.data.effectiveDate),
         reason: parse.data.reason ?? null,
-        approvalFile: { buffer: file.buffer, originalName: file.originalname ?? 'approval' },
+        approvalFile: {
+          buffer: approvalFile.buffer,
+          originalName: approvalFile.originalname ?? 'approval',
+        },
+        poFile: {
+          buffer: poFile.buffer,
+          originalName: poFile.originalname ?? 'po',
+        },
         performedByUserId: req.user.id,
         disconnectionCategoryId: parse.data.disconnectionCategoryId,
         disconnectionSubCategoryId: parse.data.disconnectionSubCategoryId,

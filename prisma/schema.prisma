@@ -85,6 +85,9 @@ model CommercialChange {
   approvalFileUrl        String?              @map("approval_file_url")
   /// Cloudinary public_id — kept for forensic re-fetch / deletion.
   approvalFilePublicId   String?              @map("approval_file_public_id")
+  /// Optional PO (Purchase Order) attachment, also in Cloudinary.
+  poFileUrl              String?              @map("po_file_url")
+  poFilePublicId         String?              @map("po_file_public_id")
   accountsNotifiedDate   DateTime?            @map("accounts_notified_date") @db.Timestamptz(6)
   createdBy              String               @map("created_by") @db.Uuid
   reason              String?

@@ -96,9 +96,12 @@ export const commercialChangesService = {
 
     const oldMrr = Number(account.currentMrr);
     const oldBandwidth = account.bandwidthMbps ?? null;
-    const isTermination = input.changeType === 'DISCONNECTION';
 
-    // 2. Transaction: create commercial_change, update account, write audit log
+    // 2. Transaction: create commercial_change row + audit log.
+    //    Account state is INTENTIONALLY NOT updated here. The account row
+    //    only mirrors the change once CRM moves the order to COMPLETED —
+    //    until then SAM should reflect what CRM is actually billing, not
+    //    what the operator submitted. See applyChangeToAccountIfReady().
     const result = await prisma.$transaction(async (tx) => {
       const change = await tx.commercialChange.create({
         data: {
@@ -122,16 +125,6 @@ export const commercialChangesService = {
           disconnectionReason: input.disconnectionReason ?? null,
         },
       });
-
-      const accountUpdate: Prisma.AccountUpdateInput = {
-        currentMrr: input.newMrr,
-        bandwidthMbps: input.newBandwidthMbps ?? account.bandwidthMbps,
-      };
-      if (isTermination) {
-        accountUpdate.contractStatus = 'TERMINATED';
-        accountUpdate.currentMrr = 0;
-      }
-      await tx.account.update({ where: { id: input.accountId }, data: accountUpdate });
 
       await tx.auditLog.create({
         data: {
@@ -272,6 +265,9 @@ export const commercialChangesService = {
   /**
    * Pull the latest CRM-side status for one commercial change and persist it.
    * Returns the updated row. No-op if the change isn't linked to a CRM order.
+   *
+   * Triggers the deferred account update if (and only if) CRM has just
+   * marked the order as COMPLETED.
    */
   async refreshCrmStatus(commercialChangeId: string) {
     const change = await prisma.commercialChange.findUnique({
@@ -289,7 +285,7 @@ export const commercialChangesService = {
     const order = orders.find((o) => o.id === change.crmServiceOrderId);
     if (!order) return change;
 
-    return prisma.commercialChange.update({
+    const updated = await prisma.commercialChange.update({
       where: { id: commercialChangeId },
       data: {
         crmStatus: order.status,
@@ -297,6 +293,12 @@ export const commercialChangesService = {
         activationDate: order.activationDate ? new Date(order.activationDate) : null,
       },
     });
+
+    // CRM has finished — mirror the change onto the account row exactly once.
+    if (updated.crmStatus === 'COMPLETED' && !updated.accountAppliedAt) {
+      return applyChangeToAccount(updated.id);
+    }
+    return updated;
   },
 
   /**
@@ -316,7 +318,7 @@ export const commercialChangesService = {
       change.crmServiceOrderId,
       activationDate,
     );
-    return prisma.commercialChange.update({
+    const updated = await prisma.commercialChange.update({
       where: { id: commercialChangeId },
       data: {
         crmStatus: order.status,
@@ -324,8 +326,57 @@ export const commercialChangesService = {
         activationDate,
       },
     });
+    // setActivationDate moves to PENDING_ACCOUNTS, not COMPLETED — the
+    // account update happens in the next refreshCrmStatus once CRM
+    // Accounts processes the order. Defensive check kept anyway.
+    if (updated.crmStatus === 'COMPLETED' && !updated.accountAppliedAt) {
+      return applyChangeToAccount(updated.id);
+    }
+    return updated;
   },
 };
+
+/**
+ * Mirror a commercial change onto its account row. Idempotent via the
+ * commercial_changes.account_applied_at marker — calling this twice on the
+ * same row is a no-op the second time.
+ *
+ *  - UPGRADE / DOWNGRADE / RATE_REVISION → set currentMrr + bandwidthMbps
+ *  - DISCONNECTION                       → set contractStatus=TERMINATED + currentMrr=0
+ *
+ * Wraps the account update + accountAppliedAt stamp in a single transaction
+ * so a crash mid-way can't leave the account updated without the marker
+ * (which would let a future refresh re-apply and double-update the account).
+ */
+async function applyChangeToAccount(commercialChangeId: string) {
+  return prisma.$transaction(async (tx) => {
+    const change = await tx.commercialChange.findUnique({
+      where: { id: commercialChangeId },
+    });
+    if (!change) throw new Error('Commercial change not found');
+    if (change.accountAppliedAt) return change; // already applied
+
+    const isTermination = change.changeType === 'DISCONNECTION';
+    const accountUpdate: Prisma.AccountUpdateInput = isTermination
+      ? { contractStatus: 'TERMINATED', currentMrr: 0 }
+      : {
+          currentMrr: Number(change.newMrr),
+          ...(change.newBandwidthMbps != null
+            ? { bandwidthMbps: change.newBandwidthMbps }
+            : {}),
+        };
+
+    await tx.account.update({
+      where: { id: change.accountId },
+      data: accountUpdate,
+    });
+
+    return tx.commercialChange.update({
+      where: { id: commercialChangeId },
+      data: { accountAppliedAt: new Date() },
+    });
+  });
+}
 
 /** Map a SAM CommitInput → the CRM service-order request body. */
 function buildServiceOrderInput(

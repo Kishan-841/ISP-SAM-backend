@@ -148,7 +148,7 @@ describe('POST /commercial-changes', () => {
     expect(res.body.error).toMatch(/approval/i);
   });
 
-  it('UPGRADE: persists, updates account MRR, writes audit log, returns email draft', async () => {
+  it('UPGRADE: persists change + audit log; account NOT updated until CRM COMPLETED', async () => {
     const { cookie, user } = await adminCookie();
     const acct = await seedAccount({ clientName: 'Acme', currentMrr: 50000, bandwidthMbps: 100 });
 
@@ -180,10 +180,11 @@ describe('POST /commercial-changes', () => {
     expect(res.body.emailDraft.subject).toContain('Acme');
     expect(res.body.emailDraft.body).toContain('Old MRR:');
 
-    // Account state changed
+    // Account state UNCHANGED until CRM COMPLETED — SAM stops mirroring
+    // optimistically.
     const after = await prisma.account.findUnique({ where: { id: acct.id } });
-    expect(Number(after?.currentMrr)).toBe(60000);
-    expect(after?.bandwidthMbps).toBe(200);
+    expect(Number(after?.currentMrr)).toBe(50000);
+    expect(after?.bandwidthMbps).toBe(100);
 
     // Audit log written
     const audits = await prisma.auditLog.findMany({
@@ -193,7 +194,7 @@ describe('POST /commercial-changes', () => {
     expect(audits[0]?.performedBy).toBe(user.id);
   });
 
-  it('DISCONNECTION: marks account TERMINATED and zeroes MRR', async () => {
+  it('DISCONNECTION: persists change; account NOT terminated until CRM COMPLETED', async () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({ clientName: 'GoneCo', currentMrr: 75000 });
 
@@ -211,8 +212,9 @@ describe('POST /commercial-changes', () => {
 
     expect(res.status).toBe(201);
     const after = await prisma.account.findUnique({ where: { id: acct.id } });
-    expect(after?.contractStatus).toBe('TERMINATED');
-    expect(Number(after?.currentMrr)).toBe(0);
+    // Pre-CRM-COMPLETED: account stays ACTIVE with original MRR.
+    expect(after?.contractStatus).toBe('ACTIVE');
+    expect(Number(after?.currentMrr)).toBe(75000);
   });
 
   it('DOWNGRADE: persists negative-delta change', async () => {
@@ -232,7 +234,112 @@ describe('POST /commercial-changes', () => {
     expect(res.body.commercialChange.oldMrr).toBe(50000);
     expect(res.body.commercialChange.newMrr).toBe(40000);
     const after = await prisma.account.findUnique({ where: { id: acct.id } });
-    expect(Number(after?.currentMrr)).toBe(40000);
+    // Pre-CRM-COMPLETED: account stays at the OLD value.
+    expect(Number(after?.currentMrr)).toBe(50000);
+  });
+});
+
+describe('Account update on CRM COMPLETED', () => {
+  beforeEach(async () => {
+    const mod = await import('../src/services/integrations/crm/index.js');
+    mod.resetCrmClientCacheForTests();
+  });
+
+  it('refreshCrmStatus applies the change to the account when CRM moves to COMPLETED', async () => {
+    process.env.CRM_SERVICE_ORDERS_ENABLED = 'true';
+    const { CrmStub, setCrmClientForTests } = await import(
+      '../src/services/integrations/crm/index.js'
+    );
+    const stub = new CrmStub();
+    setCrmClientForTests(stub);
+
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'Acme',
+      currentMrr: 50000,
+      bandwidthMbps: 100,
+      externalCrmId: 'crm-acme-completed',
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'UPGRADE')
+      .field('newMrr', '60000')
+      .field('newBandwidthMbps', '200')
+      .field('effectiveDate', '2026-05-01')
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
+    expect(res.status).toBe(201);
+
+    // Account untouched right after submission.
+    let after = await prisma.account.findUnique({ where: { id: acct.id } });
+    expect(Number(after?.currentMrr)).toBe(50000);
+    expect(after?.bandwidthMbps).toBe(100);
+
+    // Simulate CRM advancing the order to COMPLETED, then SAM refreshing.
+    const order = stub.serviceOrders[0]!;
+    order.status = 'COMPLETED';
+    const refreshRes = await request(app)
+      .post(`/commercial-changes/${res.body.commercialChange.id}/refresh-status`)
+      .set('Cookie', cookie);
+    expect(refreshRes.status).toBe(200);
+    expect(refreshRes.body.change.crmStatus).toBe('COMPLETED');
+    expect(refreshRes.body.change.accountAppliedAt).not.toBeNull();
+
+    // Account is NOW updated.
+    after = await prisma.account.findUnique({ where: { id: acct.id } });
+    expect(Number(after?.currentMrr)).toBe(60000);
+    expect(after?.bandwidthMbps).toBe(200);
+
+    // Idempotent — refreshing again doesn't double-apply.
+    const refreshAgain = await request(app)
+      .post(`/commercial-changes/${res.body.commercialChange.id}/refresh-status`)
+      .set('Cookie', cookie);
+    expect(refreshAgain.status).toBe(200);
+    after = await prisma.account.findUnique({ where: { id: acct.id } });
+    expect(Number(after?.currentMrr)).toBe(60000);
+  });
+
+  it('DISCONNECTION: account becomes TERMINATED only on COMPLETED', async () => {
+    process.env.CRM_SERVICE_ORDERS_ENABLED = 'true';
+    const { CrmStub, setCrmClientForTests } = await import(
+      '../src/services/integrations/crm/index.js'
+    );
+    const stub = new CrmStub();
+    setCrmClientForTests(stub);
+
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'GoneCo',
+      currentMrr: 75000,
+      externalCrmId: 'crm-gone-completed',
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'DISCONNECTION')
+      .field('newMrr', '0')
+      .field('effectiveDate', '2026-05-01')
+      .field('disconnectionCategoryId', 'cat-1')
+      .field('disconnectionSubCategoryId', 'sub-1')
+      .attach('approvalFile', PDF_BUFFER, 'disco.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
+    expect(res.status).toBe(201);
+
+    // Pre-COMPLETED: still ACTIVE.
+    let after = await prisma.account.findUnique({ where: { id: acct.id } });
+    expect(after?.contractStatus).toBe('ACTIVE');
+    expect(Number(after?.currentMrr)).toBe(75000);
+
+    // CRM advances to COMPLETED → SAM refresh.
+    stub.serviceOrders[0]!.status = 'COMPLETED';
+    await request(app)
+      .post(`/commercial-changes/${res.body.commercialChange.id}/refresh-status`)
+      .set('Cookie', cookie);
+
+    after = await prisma.account.findUnique({ where: { id: acct.id } });
+    expect(after?.contractStatus).toBe('TERMINATED');
+    expect(Number(after?.currentMrr)).toBe(0);
   });
 });
 

@@ -107,6 +107,10 @@ model CommercialChange {
   /// Set during the PENDING_SAM_ACTIVATION → PENDING_ACCOUNTS transition
   /// once the SAM operator collects the billing-start date from the customer.
   activationDate             DateTime? @map("activation_date") @db.Date
+  /// Set ONCE when this change is mirrored onto the account row
+  /// (current_mrr / bandwidth / contract_status). Used as the idempotency
+  /// marker so a re-fetch after COMPLETED doesn't double-apply.
+  accountAppliedAt           DateTime? @map("account_applied_at") @db.Timestamptz(6)
 
   // Disconnection-specific fields. Populated only when changeType=DISCONNECTION.
   disconnectionCategoryId    String?   @map("disconnection_category_id")

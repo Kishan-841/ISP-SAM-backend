@@ -1,8 +1,14 @@
 import { Router } from 'express';
 import { dashboardController } from './dashboard.controller.js';
-import { requireAuth } from '../auth/auth.middleware.js';
+import { requireAuth, requireRole } from '../auth/auth.middleware.js';
 
 export const dashboardRouter = Router();
 dashboardRouter.use(requireAuth);
 dashboardRouter.get('/existing-base', dashboardController.existingBase);
 dashboardRouter.get('/new-base', dashboardController.newBase);
+dashboardRouter.get(
+  '/team-performance',
+  requireRole('ADMIN', 'SAM_HEAD'),
+  dashboardController.teamPerformance,
+);
+dashboardRouter.get('/alerts', dashboardController.alerts);

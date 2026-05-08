@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { usersService } from './users.service.js';
+import type { AuthedRequest } from '../auth/auth.middleware.js';
 
 const createSchema = z.object({
   email: z.string().email().transform((s) => s.toLowerCase()),
@@ -33,6 +34,15 @@ export const usersController = {
   async list(_req: Request, res: Response) {
     const users = await usersService.list();
     res.json({ users: users.map(publicUser) });
+  },
+
+  async team(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const users = await usersService.team({ requester: req.user });
+    res.json({ users });
   },
 
   async getById(req: Request, res: Response) {

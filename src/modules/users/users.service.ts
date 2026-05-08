@@ -12,6 +12,23 @@ export const usersService = {
     });
   },
 
+  /**
+   * Returns the SAMs that the assign-customer dropdown should offer.
+   *  - ADMIN     → every SAM in the system
+   *  - SAM_HEAD  → only SAMs whose samHeadId equals the requester's id
+   */
+  team({ requester }: { requester: { id: string; role: UserRole } }) {
+    const where =
+      requester.role === 'SAM_HEAD'
+        ? { role: 'SAM' as const, samHeadId: requester.id }
+        : { role: 'SAM' as const };
+    return prisma.user.findMany({
+      where,
+      select: { id: true, name: true, email: true },
+      orderBy: { name: 'asc' },
+    });
+  },
+
   getById(id: string) {
     return prisma.user.findUnique({
       where: { id },

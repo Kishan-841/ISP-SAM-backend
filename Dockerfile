@@ -15,7 +15,12 @@ RUN apk add --no-cache openssl
 WORKDIR /app
 
 # pnpm via corepack — no separate install step needed.
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Pin pnpm to v10. pnpm@latest now resolves to v11+, which (a) requires
+# Node 22.13+ (we have it) but (b) made build-script approvals stricter —
+# it ignores `onlyBuiltDependencies` in package.json and demands either
+# interactive approval or a separate pnpm-workspace.yaml. v10 honours the
+# existing config and is still actively maintained.
+RUN corepack enable && corepack prepare pnpm@10 --activate
 
 # Cache deps independently of source — package.json + lockfile change less often.
 COPY package.json pnpm-lock.yaml ./
@@ -44,7 +49,12 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=5500
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Pin pnpm to v10. pnpm@latest now resolves to v11+, which (a) requires
+# Node 22.13+ (we have it) but (b) made build-script approvals stricter —
+# it ignores `onlyBuiltDependencies` in package.json and demands either
+# interactive approval or a separate pnpm-workspace.yaml. v10 honours the
+# existing config and is still actively maintained.
+RUN corepack enable && corepack prepare pnpm@10 --activate
 
 # Install production deps. `prisma` is now in dependencies (not devDeps) so
 # both the CLI (for `prisma migrate deploy` at boot) and the client are

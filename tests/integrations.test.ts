@@ -22,7 +22,7 @@ afterEach(async () => {
 
 type Payload = ReturnType<typeof samplePayload>;
 
-function samplePayload(overrides: Partial<{ eventId: string; companyName: string; externalId: string; currentMrr: number }> = {}) {
+function samplePayload(overrides: Partial<{ eventId: string; companyName: string; externalId: string; currentArc: number }> = {}) {
   return {
     eventId: overrides.eventId ?? crypto.randomUUID(),
     eventType: 'customer.activated' as const,
@@ -36,7 +36,7 @@ function samplePayload(overrides: Partial<{ eventId: string; companyName: string
       circuitId: `CKT-${Math.floor(Math.random() * 10000)}`,
       bandwidthMbps: 100,
       currentPlan: 'Enterprise 100Mbps',
-      currentMrr: overrides.currentMrr ?? 50000,
+      currentArc: overrides.currentArc ?? 600000,
       onboardingDate: '2026-05-02',
     },
   };
@@ -81,7 +81,7 @@ describe('POST /integrations/crm/customer-activated', () => {
       expect(account?.contractStatus).toBe('ACTIVE');
       expect(account?.companyName).toBe('HealthPlus Hospitals');
       expect(account?.clientName).toBe('Priya Nair');
-      expect(Number(account?.currentMrr)).toBe(50000);
+      expect(Number(account?.currentArc)).toBe(600000);
       expect(account?.bandwidthMbps).toBe(100);
       expect(account?.email).toBe('ops@healthplus.in');
       expect(account?.mobileNumber).toBe('+919999999999');
@@ -94,15 +94,15 @@ describe('POST /integrations/crm/customer-activated', () => {
       expect(event?.signatureHeader).toBeTruthy();
     });
 
-    it('accepts currentArc (annual) and stores it as currentMrr / 12', async () => {
+    it('accepts legacy currentMrr (monthly) and stores it as currentArc × 12', async () => {
       const payload = samplePayload();
-      // Drop currentMrr from the test payload, send currentArc instead.
+      // Drop currentArc, send currentMrr instead.
       const variant = {
         ...payload,
         customer: {
           ...payload.customer,
-          currentMrr: undefined as unknown as number,
-          currentArc: 600000, // ₹6L/year → ₹50K/month
+          currentArc: undefined as unknown as number,
+          currentMrr: 50000, // ₹50K/month → ₹6L/year
         },
       } as Payload;
       const res = await postWebhook(variant);
@@ -110,16 +110,16 @@ describe('POST /integrations/crm/customer-activated', () => {
       const account = await prisma.account.findUnique({
         where: { externalCrmId: variant.customer.externalId },
       });
-      expect(Number(account?.currentMrr)).toBe(50000);
+      expect(Number(account?.currentArc)).toBe(600000);
     });
 
-    it('rejects payload missing both currentMrr and currentArc', async () => {
+    it('rejects payload missing both currentArc and currentMrr', async () => {
       const payload = samplePayload();
       const variant = {
         ...payload,
         customer: {
           ...payload.customer,
-          currentMrr: undefined as unknown as number,
+          currentArc: undefined as unknown as number,
         },
       } as Payload;
       const res = await postWebhook(variant);
@@ -128,15 +128,15 @@ describe('POST /integrations/crm/customer-activated', () => {
 
     it('updates an existing Account on subsequent activation events', async () => {
       const externalId = `lead-${crypto.randomUUID()}`;
-      await postWebhook(samplePayload({ externalId, currentMrr: 30000 }));
+      await postWebhook(samplePayload({ externalId, currentArc: 360000 }));
       await postWebhook(
-        samplePayload({ externalId, currentMrr: 45000, companyName: 'HealthPlus Hospitals Pvt Ltd' }),
+        samplePayload({ externalId, currentArc: 540000, companyName: 'HealthPlus Hospitals Pvt Ltd' }),
       );
       const accounts = await prisma.account.findMany({
         where: { externalCrmId: externalId },
       });
       expect(accounts).toHaveLength(1);
-      expect(Number(accounts[0]!.currentMrr)).toBe(45000);
+      expect(Number(accounts[0]!.currentArc)).toBe(540000);
       expect(accounts[0]!.companyName).toBe('HealthPlus Hospitals Pvt Ltd');
     });
   });
@@ -170,7 +170,7 @@ describe('POST /integrations/crm/customer-activated', () => {
       const { signature, ts } = sign(payload);
       const tamperedBody = JSON.stringify({
         ...payload,
-        customer: { ...payload.customer, currentMrr: 999_999_999 },
+        customer: { ...payload.customer, currentArc: 999_999_999 },
       });
       const res = await request(app)
         .post('/integrations/crm/customer-activated')
@@ -267,7 +267,7 @@ describe('POST /integrations/crm/customer-activated', () => {
       await postWebhook(payload);
       await postWebhook(payload);
       // 1 rejected (validation)
-      await postWebhook({ ...samplePayload(), customer: { externalId: 'x', currentMrr: 1, onboardingDate: '2026-01-01' } } as Payload);
+      await postWebhook({ ...samplePayload(), customer: { externalId: 'x', currentArc: 12, onboardingDate: '2026-01-01' } } as Payload);
 
       const allRes = await request(app).get('/integrations/events').set('Cookie', adminCookie);
       expect(allRes.status).toBe(200);
@@ -301,7 +301,7 @@ describe('POST /integrations/crm/customer-activated', () => {
         customer: {
           externalId: 'lead-xyz',
           // companyName intentionally missing
-          currentMrr: 10000,
+          currentArc: 120000,
           onboardingDate: '2026-05-02',
         },
       } as unknown as Payload;

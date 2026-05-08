@@ -15,7 +15,7 @@ export async function seedAccount(overrides: Partial<Parameters<typeof prisma.ac
     data: {
       clientName: 'Test Co',
       kittyType: 'BASE',
-      currentMrr: 10000,
+      currentArc: 120000,
       contractStatus: 'ACTIVE',
       onboardingDate: new Date('2025-01-01'),
       ...overrides,

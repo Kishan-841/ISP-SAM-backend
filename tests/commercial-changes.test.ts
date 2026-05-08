@@ -53,12 +53,12 @@ const PDF_BUFFER = Buffer.from('%PDF-1.4 mock approval');
 
 describe('POST /commercial-changes', () => {
   it('401 without cookie', async () => {
-    const acct = await seedAccount({ clientName: 'Acme', currentMrr: 50000 });
+    const acct = await seedAccount({ clientName: 'Acme', currentArc: 600000 });
     const res = await request(app)
       .post('/commercial-changes')
       .field('accountId', acct.id)
       .field('changeType', 'UPGRADE')
-      .field('newMrr', '60000')
+      .field('newArc', '720000')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(401);
@@ -66,13 +66,13 @@ describe('POST /commercial-changes', () => {
 
   it('422 when no file is attached (HARD GATE)', async () => {
     const { cookie } = await adminCookie();
-    const acct = await seedAccount({ clientName: 'Acme', currentMrr: 50000 });
+    const acct = await seedAccount({ clientName: 'Acme', currentArc: 600000 });
     const res = await request(app)
       .post('/commercial-changes')
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'UPGRADE')
-      .field('newMrr', '60000')
+      .field('newArc', '720000')
       .field('effectiveDate', '2026-05-01');
     expect(res.status).toBe(422);
     expect(res.body.error).toMatch(/mandatory/i);
@@ -85,7 +85,7 @@ describe('POST /commercial-changes', () => {
       .set('Cookie', cookie)
       .field('accountId', 'not-a-uuid')
       .field('changeType', 'UPGRADE')
-      .field('newMrr', '60000')
+      .field('newArc', '720000')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(400);
@@ -98,7 +98,7 @@ describe('POST /commercial-changes', () => {
       .set('Cookie', cookie)
       .field('accountId', '00000000-0000-0000-0000-000000000000')
       .field('changeType', 'UPGRADE')
-      .field('newMrr', '60000')
+      .field('newArc', '720000')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(404);
@@ -106,13 +106,13 @@ describe('POST /commercial-changes', () => {
 
   it('422 when file extension is not .eml/.msg/.pdf', async () => {
     const { cookie } = await adminCookie();
-    const acct = await seedAccount({ clientName: 'Acme', currentMrr: 50000 });
+    const acct = await seedAccount({ clientName: 'Acme', currentArc: 600000 });
     const res = await request(app)
       .post('/commercial-changes')
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'UPGRADE')
-      .field('newMrr', '60000')
+      .field('newArc', '720000')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'approval.txt');
     expect(res.status).toBe(422);
@@ -120,13 +120,13 @@ describe('POST /commercial-changes', () => {
 
   it('422 when poFile is missing (PO is mandatory)', async () => {
     const { cookie } = await adminCookie();
-    const acct = await seedAccount({ clientName: 'Acme', currentMrr: 50000 });
+    const acct = await seedAccount({ clientName: 'Acme', currentArc: 600000 });
     const res = await request(app)
       .post('/commercial-changes')
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'UPGRADE')
-      .field('newMrr', '60000')
+      .field('newArc', '720000')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'approval.pdf');
     expect(res.status).toBe(422);
@@ -135,13 +135,13 @@ describe('POST /commercial-changes', () => {
 
   it('422 when approvalFile is missing (approval is mandatory)', async () => {
     const { cookie } = await adminCookie();
-    const acct = await seedAccount({ clientName: 'Acme', currentMrr: 50000 });
+    const acct = await seedAccount({ clientName: 'Acme', currentArc: 600000 });
     const res = await request(app)
       .post('/commercial-changes')
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'UPGRADE')
-      .field('newMrr', '60000')
+      .field('newArc', '720000')
       .field('effectiveDate', '2026-05-01')
       .attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(422);
@@ -150,14 +150,14 @@ describe('POST /commercial-changes', () => {
 
   it('UPGRADE: persists change + audit log; account NOT updated until CRM COMPLETED', async () => {
     const { cookie, user } = await adminCookie();
-    const acct = await seedAccount({ clientName: 'Acme', currentMrr: 50000, bandwidthMbps: 100 });
+    const acct = await seedAccount({ clientName: 'Acme', currentArc: 600000, bandwidthMbps: 100 });
 
     const res = await request(app)
       .post('/commercial-changes')
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'UPGRADE')
-      .field('newMrr', '60000')
+      .field('newArc', '720000')
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
       .field('reason', 'Customer capacity expansion')
@@ -165,8 +165,8 @@ describe('POST /commercial-changes', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.commercialChange.changeType).toBe('UPGRADE');
-    expect(res.body.commercialChange.oldMrr).toBe(50000);
-    expect(res.body.commercialChange.newMrr).toBe(60000);
+    expect(res.body.commercialChange.oldArc).toBe(600000);
+    expect(res.body.commercialChange.newArc).toBe(720000);
     expect(res.body.commercialChange.approvalFileUrl).toMatch(/^https:\/\/res\.cloudinary\.com\//);
     expect(res.body.commercialChange.approvalFilePublicId).toMatch(/^sam-software\/po-and-mail-acceptance\//);
     // Uploader was invoked twice — once for approval, once for PO — both
@@ -178,17 +178,19 @@ describe('POST /commercial-changes', () => {
     expect(poCall?.originalName).toBe('po.pdf');
     expect(approvalCall?.commercialChangeId).toBe(poCall?.commercialChangeId);
     expect(res.body.emailDraft.subject).toContain('Acme');
-    expect(res.body.emailDraft.body).toContain('Old MRR:');
+    expect(res.body.emailDraft.body).toContain('Old ARC:');
 
     // Account state UNCHANGED until CRM COMPLETED — SAM stops mirroring
     // optimistically.
     const after = await prisma.account.findUnique({ where: { id: acct.id } });
-    expect(Number(after?.currentMrr)).toBe(50000);
+    expect(Number(after?.currentArc)).toBe(600000);
     expect(after?.bandwidthMbps).toBe(100);
 
-    // Audit log written
+    // Audit log written. Filter to the COMMIT action — the notification
+    // bridge also writes a NOTIFY_ACCOUNTS_TEAM row (SKIPPED when the env
+    // toggle is off, which is the test default).
     const audits = await prisma.auditLog.findMany({
-      where: { entityType: 'CommercialChange' },
+      where: { entityType: 'CommercialChange', action: 'COMMIT' },
     });
     expect(audits).toHaveLength(1);
     expect(audits[0]?.performedBy).toBe(user.id);
@@ -196,14 +198,14 @@ describe('POST /commercial-changes', () => {
 
   it('DISCONNECTION: persists change; account NOT terminated until CRM COMPLETED', async () => {
     const { cookie } = await adminCookie();
-    const acct = await seedAccount({ clientName: 'GoneCo', currentMrr: 75000 });
+    const acct = await seedAccount({ clientName: 'GoneCo', currentArc: 900000 });
 
     const res = await request(app)
       .post('/commercial-changes')
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'DISCONNECTION')
-      .field('newMrr', '0')
+      .field('newArc', '0')
       .field('effectiveDate', '2026-05-01')
       .field('reason', 'Customer churn')
       .field('disconnectionCategoryId', '00000000-0000-0000-0000-000000000001')
@@ -212,30 +214,30 @@ describe('POST /commercial-changes', () => {
 
     expect(res.status).toBe(201);
     const after = await prisma.account.findUnique({ where: { id: acct.id } });
-    // Pre-CRM-COMPLETED: account stays ACTIVE with original MRR.
+    // Pre-CRM-COMPLETED: account stays ACTIVE with original ARC.
     expect(after?.contractStatus).toBe('ACTIVE');
-    expect(Number(after?.currentMrr)).toBe(75000);
+    expect(Number(after?.currentArc)).toBe(900000);
   });
 
   it('DOWNGRADE: persists negative-delta change', async () => {
     const { cookie } = await adminCookie();
-    const acct = await seedAccount({ clientName: 'Acme', currentMrr: 50000 });
+    const acct = await seedAccount({ clientName: 'Acme', currentArc: 600000 });
 
     const res = await request(app)
       .post('/commercial-changes')
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'DOWNGRADE')
-      .field('newMrr', '40000')
+      .field('newArc', '480000')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
 
     expect(res.status).toBe(201);
-    expect(res.body.commercialChange.oldMrr).toBe(50000);
-    expect(res.body.commercialChange.newMrr).toBe(40000);
+    expect(res.body.commercialChange.oldArc).toBe(600000);
+    expect(res.body.commercialChange.newArc).toBe(480000);
     const after = await prisma.account.findUnique({ where: { id: acct.id } });
     // Pre-CRM-COMPLETED: account stays at the OLD value.
-    expect(Number(after?.currentMrr)).toBe(50000);
+    expect(Number(after?.currentArc)).toBe(600000);
   });
 });
 
@@ -256,7 +258,7 @@ describe('Account update on CRM COMPLETED', () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({
       clientName: 'Acme',
-      currentMrr: 50000,
+      currentArc: 600000,
       bandwidthMbps: 100,
       externalCrmId: 'crm-acme-completed',
     });
@@ -265,7 +267,7 @@ describe('Account update on CRM COMPLETED', () => {
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'UPGRADE')
-      .field('newMrr', '60000')
+      .field('newArc', '720000')
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
@@ -273,7 +275,7 @@ describe('Account update on CRM COMPLETED', () => {
 
     // Account untouched right after submission.
     let after = await prisma.account.findUnique({ where: { id: acct.id } });
-    expect(Number(after?.currentMrr)).toBe(50000);
+    expect(Number(after?.currentArc)).toBe(600000);
     expect(after?.bandwidthMbps).toBe(100);
 
     // Simulate CRM advancing the order to COMPLETED, then SAM refreshing.
@@ -288,7 +290,7 @@ describe('Account update on CRM COMPLETED', () => {
 
     // Account is NOW updated.
     after = await prisma.account.findUnique({ where: { id: acct.id } });
-    expect(Number(after?.currentMrr)).toBe(60000);
+    expect(Number(after?.currentArc)).toBe(720000);
     expect(after?.bandwidthMbps).toBe(200);
 
     // Idempotent — refreshing again doesn't double-apply.
@@ -297,7 +299,7 @@ describe('Account update on CRM COMPLETED', () => {
       .set('Cookie', cookie);
     expect(refreshAgain.status).toBe(200);
     after = await prisma.account.findUnique({ where: { id: acct.id } });
-    expect(Number(after?.currentMrr)).toBe(60000);
+    expect(Number(after?.currentArc)).toBe(720000);
   });
 
   it('DISCONNECTION: account becomes TERMINATED only on COMPLETED', async () => {
@@ -311,7 +313,7 @@ describe('Account update on CRM COMPLETED', () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({
       clientName: 'GoneCo',
-      currentMrr: 75000,
+      currentArc: 900000,
       externalCrmId: 'crm-gone-completed',
     });
     const res = await request(app)
@@ -319,7 +321,7 @@ describe('Account update on CRM COMPLETED', () => {
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'DISCONNECTION')
-      .field('newMrr', '0')
+      .field('newArc', '0')
       .field('effectiveDate', '2026-05-01')
       .field('disconnectionCategoryId', 'cat-1')
       .field('disconnectionSubCategoryId', 'sub-1')
@@ -329,7 +331,7 @@ describe('Account update on CRM COMPLETED', () => {
     // Pre-COMPLETED: still ACTIVE.
     let after = await prisma.account.findUnique({ where: { id: acct.id } });
     expect(after?.contractStatus).toBe('ACTIVE');
-    expect(Number(after?.currentMrr)).toBe(75000);
+    expect(Number(after?.currentArc)).toBe(900000);
 
     // CRM advances to COMPLETED → SAM refresh.
     stub.serviceOrders[0]!.status = 'COMPLETED';
@@ -339,7 +341,7 @@ describe('Account update on CRM COMPLETED', () => {
 
     after = await prisma.account.findUnique({ where: { id: acct.id } });
     expect(after?.contractStatus).toBe('TERMINATED');
-    expect(Number(after?.currentMrr)).toBe(0);
+    expect(Number(after?.currentArc)).toBe(0);
   });
 });
 
@@ -358,13 +360,13 @@ describe('GET /commercial-changes', () => {
 
   it('lists all changes for ADMIN; filters by type', async () => {
     const { cookie, user } = await adminCookie();
-    const acct = await seedAccount({ clientName: 'Acme', currentMrr: 50000 });
+    const acct = await seedAccount({ clientName: 'Acme', currentArc: 600000 });
     await prisma.commercialChange.create({
       data: {
         accountId: acct.id,
         changeType: 'UPGRADE',
-        oldMrr: 50000,
-        newMrr: 60000,
+        oldArc: 600000,
+        newArc: 720000,
         effectiveDate: new Date('2026-04-15'),
         clientApprovalAttached: true,
         createdBy: user.id,
@@ -374,8 +376,8 @@ describe('GET /commercial-changes', () => {
       data: {
         accountId: acct.id,
         changeType: 'DOWNGRADE',
-        oldMrr: 60000,
-        newMrr: 55000,
+        oldArc: 720000,
+        newArc: 660000,
         effectiveDate: new Date('2026-04-20'),
         clientApprovalAttached: true,
         createdBy: user.id,
@@ -398,17 +400,17 @@ describe('GET /commercial-changes', () => {
   it('SAM only sees changes for their own accounts', async () => {
     const sam1 = await seedUser({ email: 'sam1@x.com', role: 'SAM' });
     const sam2 = await seedUser({ email: 'sam2@x.com', role: 'SAM' });
-    const a1 = await seedAccount({ clientName: 'A', currentMrr: 10000, samOwnerId: sam1.id });
-    const a2 = await seedAccount({ clientName: 'B', currentMrr: 20000, samOwnerId: sam2.id });
+    const a1 = await seedAccount({ clientName: 'A', currentArc: 120000, samOwnerId: sam1.id });
+    const a2 = await seedAccount({ clientName: 'B', currentArc: 240000, samOwnerId: sam2.id });
     await prisma.commercialChange.create({
       data: {
-        accountId: a1.id, changeType: 'UPGRADE', oldMrr: 10000, newMrr: 12000,
+        accountId: a1.id, changeType: 'UPGRADE', oldArc: 120000, newArc: 144000,
         effectiveDate: new Date(), clientApprovalAttached: true, createdBy: sam1.id,
       },
     });
     await prisma.commercialChange.create({
       data: {
-        accountId: a2.id, changeType: 'UPGRADE', oldMrr: 20000, newMrr: 25000,
+        accountId: a2.id, changeType: 'UPGRADE', oldArc: 240000, newArc: 300000,
         effectiveDate: new Date(), clientApprovalAttached: true, createdBy: sam2.id,
       },
     });
@@ -434,7 +436,7 @@ describe('CRM service-order bridge', () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({
       clientName: 'Acme',
-      currentMrr: 50000,
+      currentArc: 600000,
       externalCrmId: 'crm-acme-1',
     });
     const res = await request(app)
@@ -442,7 +444,7 @@ describe('CRM service-order bridge', () => {
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'UPGRADE')
-      .field('newMrr', '60000')
+      .field('newArc', '720000')
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
@@ -451,7 +453,7 @@ describe('CRM service-order bridge', () => {
     expect(res.body.commercialChange.crmServiceOrderId).toBeNull();
   });
 
-  it('UPGRADE: forwards × 12 ARC + bandwidth to CRM and stores order ref', async () => {
+  it('UPGRADE: forwards ARC + bandwidth to CRM and stores order ref', async () => {
     process.env.CRM_SERVICE_ORDERS_ENABLED = 'true';
     const { CrmStub, setCrmClientForTests } = await import(
       '../src/services/integrations/crm/index.js'
@@ -462,7 +464,7 @@ describe('CRM service-order bridge', () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({
       clientName: 'Acme',
-      currentMrr: 50000,
+      currentArc: 600000,
       bandwidthMbps: 100,
       externalCrmId: 'crm-acme-2',
     });
@@ -471,18 +473,18 @@ describe('CRM service-order bridge', () => {
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'UPGRADE')
-      .field('newMrr', '60000')
+      .field('newArc', '720000')
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(201);
 
-    // CRM was called with the right shape — × 12 ARC, customerId = externalCrmId
+    // CRM was called with the right shape — ARC pass-through, customerId = externalCrmId
     expect(stub.createServiceOrderCalls).toHaveLength(1);
     const call = stub.createServiceOrderCalls[0]!;
     expect(call.customerId).toBe('crm-acme-2');
     expect(call.orderType).toBe('UPGRADE');
-    expect(call.newArc).toBe(720000); // 60000 * 12
+    expect(call.newArc).toBe(720000);
     expect(call.newBandwidth).toBe(200);
     // SAM internal ticket id is round-tripped via the notes field for
     // cross-system traceability.
@@ -505,7 +507,7 @@ describe('CRM service-order bridge', () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({
       clientName: 'Acme',
-      currentMrr: 50000,
+      currentArc: 600000,
       bandwidthMbps: 100,
       externalCrmId: 'crm-acme-notes',
     });
@@ -514,7 +516,7 @@ describe('CRM service-order bridge', () => {
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'UPGRADE')
-      .field('newMrr', '60000')
+      .field('newArc', '720000')
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
       .field('notes', 'Customer expanding to add 50 devices')
@@ -535,7 +537,7 @@ describe('CRM service-order bridge', () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({
       clientName: 'Acme',
-      currentMrr: 50000,
+      currentArc: 600000,
       bandwidthMbps: 100,
       externalCrmId: 'crm-acme-cloudinary',
     });
@@ -544,7 +546,7 @@ describe('CRM service-order bridge', () => {
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'UPGRADE')
-      .field('newMrr', '60000')
+      .field('newArc', '720000')
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'customer_approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
@@ -571,7 +573,7 @@ describe('CRM service-order bridge', () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({
       clientName: 'GoneCo',
-      currentMrr: 75000,
+      currentArc: 900000,
       externalCrmId: 'crm-gone-1',
     });
     const res = await request(app)
@@ -579,7 +581,7 @@ describe('CRM service-order bridge', () => {
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'DISCONNECTION')
-      .field('newMrr', '0')
+      .field('newArc', '0')
       .field('effectiveDate', '2026-05-01')
       .field('disconnectionCategoryId', 'cat-1')
       .field('disconnectionSubCategoryId', 'sub-1')
@@ -609,7 +611,7 @@ describe('CRM service-order bridge', () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({
       clientName: 'Bad',
-      currentMrr: 10000,
+      currentArc: 120000,
       externalCrmId: 'crm-bad-1',
     });
     const res = await request(app)
@@ -617,7 +619,7 @@ describe('CRM service-order bridge', () => {
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'UPGRADE')
-      .field('newMrr', '20000')
+      .field('newArc', '240000')
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
@@ -640,7 +642,7 @@ describe('CRM service-order bridge', () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({
       clientName: 'X',
-      currentMrr: 10000,
+      currentArc: 120000,
       externalCrmId: 'crm-x-1',
     });
     const res = await request(app)
@@ -648,7 +650,7 @@ describe('CRM service-order bridge', () => {
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'DISCONNECTION')
-      .field('newMrr', '0')
+      .field('newArc', '0')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'disco.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(400);
@@ -660,7 +662,7 @@ describe('CRM service-order bridge', () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({
       clientName: 'NoCrm',
-      currentMrr: 10000,
+      currentArc: 120000,
       externalCrmId: null,
     });
     const res = await request(app)
@@ -668,7 +670,7 @@ describe('CRM service-order bridge', () => {
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'UPGRADE')
-      .field('newMrr', '20000')
+      .field('newArc', '240000')
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');

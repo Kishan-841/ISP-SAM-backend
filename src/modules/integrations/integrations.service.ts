@@ -1,5 +1,11 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../prisma.js';
+import { sendCustomerActivatedAlert } from '../../services/email/notifications.service.js';
+
+/** UUID stamped on audit rows for events that don't have a real user actor
+ *  (CRM webhooks). Doesn't need to point at an existing user — audit_logs
+ *  doesn't FK against users so a stable sentinel is fine. */
+const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 
 export type CustomerActivatedPayload = {
   eventId: string;
@@ -14,18 +20,22 @@ export type CustomerActivatedPayload = {
     circuitId?: string | null;
     bandwidthMbps?: number | null;
     currentPlan?: string | null;
-    /** Monthly figure. Optional — payload must provide either currentMrr or currentArc. */
-    currentMrr?: number;
-    /** Annual figure (= currentMrr × 12). Preferred when present. */
+    /**
+     * Annual figure. CRM started sending this directly.
+     * `currentMrr` (monthly) is still accepted at the boundary as a
+     * backwards-compat input — the service multiplies it by 12 and stores ARC.
+     */
     currentArc?: number;
+    /** Legacy monthly figure. Multiplied × 12 at ingest. */
+    currentMrr?: number;
     onboardingDate: string;
   };
 };
 
-/** Resolve the monthly figure from whichever field the CRM sent. */
-function resolveMonthlyMrr(c: CustomerActivatedPayload['customer']): number {
-  if (typeof c.currentArc === 'number') return c.currentArc / 12;
-  if (typeof c.currentMrr === 'number') return c.currentMrr;
+/** Resolve the annual ARC from whichever field the CRM sent. */
+function resolveCurrentArc(c: CustomerActivatedPayload['customer']): number {
+  if (typeof c.currentArc === 'number') return c.currentArc;
+  if (typeof c.currentMrr === 'number') return c.currentMrr * 12;
   // Schema validation should have rejected this, but defend anyway.
   throw new Error('customer payload missing both currentMrr and currentArc');
 }
@@ -94,7 +104,7 @@ export const integrationsService = {
 
     // 2. Upsert the Account.
     const c = payload.customer;
-    const monthlyMrr = resolveMonthlyMrr(c);
+    const currentArc = resolveCurrentArc(c);
     const account = await prisma.account.upsert({
       where: { externalCrmId: c.externalId },
       create: {
@@ -102,7 +112,7 @@ export const integrationsService = {
         companyName: c.companyName,
         kittyType: 'NEW',
         contractStatus: 'ACTIVE',
-        currentMrr: new Prisma.Decimal(monthlyMrr),
+        currentArc: new Prisma.Decimal(currentArc),
         onboardingDate: new Date(c.onboardingDate),
         externalCrmId: c.externalId,
         email: c.email ?? null,
@@ -114,7 +124,7 @@ export const integrationsService = {
       update: {
         companyName: c.companyName,
         clientName: c.contactName?.trim() || c.companyName,
-        currentMrr: new Prisma.Decimal(monthlyMrr),
+        currentArc: new Prisma.Decimal(currentArc),
         email: c.email ?? null,
         mobileNumber: c.phone ?? null,
         currentPlan: c.currentPlan ?? null,
@@ -129,6 +139,29 @@ export const integrationsService = {
       where: { id: event.id },
       data: { status: 'PROCESSED', accountId: account.id, statusReason: null },
     });
+
+    // 4. Best-effort: notify all SAM_HEADs that a new customer is in their
+    //    triage queue. Audit-logged whether or not transport actually fires.
+    //    Re-fetch with the fields the template needs (currentArc, bandwidth).
+    const accountForEmail = await prisma.account.findUnique({
+      where: { id: account.id },
+      select: {
+        id: true,
+        clientName: true,
+        companyName: true,
+        customerCode: true,
+        circuitId: true,
+        currentArc: true,
+        bandwidthMbps: true,
+      },
+    });
+    if (accountForEmail) {
+      await sendCustomerActivatedAlert({
+        accountId: accountForEmail.id,
+        account: accountForEmail,
+        systemUserId: SYSTEM_USER_ID,
+      });
+    }
 
     return { status: 'PROCESSED', accountId: account.id, eventId: event.id };
   },

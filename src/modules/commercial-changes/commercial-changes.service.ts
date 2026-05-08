@@ -9,13 +9,18 @@ import {
   type ServiceOrderType,
 } from '../../services/integrations/crm/index.js';
 import { getApprovalFileUploader } from '../../services/storage/cloudinary-storage.js';
+import {
+  sendCommercialChangeAlert,
+  sendCrmStatusChangeAlert,
+} from '../../services/email/notifications.service.js';
 
 export type Requester = { id: string; role: UserRole };
 
 export type CommitInput = {
   accountId: string;
   changeType: CommercialChangeType;
-  newMrr: number;
+  /** Annual ₹ — what every layer of the platform now speaks. */
+  newArc: number;
   newBandwidthMbps: number | null;
   effectiveDate: Date;
   reason: string | null;
@@ -35,8 +40,8 @@ export type CommitResult = {
     id: string;
     accountId: string;
     changeType: CommercialChangeType;
-    oldMrr: number;
-    newMrr: number;
+    oldArc: number;
+    newArc: number;
     effectiveDate: string;
     approvalFileUrl: string;
     approvalFilePublicId: string | null;
@@ -94,22 +99,22 @@ export const commercialChangesService = {
       }),
     ]);
 
-    const oldMrr = Number(account.currentMrr);
+    const oldArc = Number(account.currentArc);
     const oldBandwidth = account.bandwidthMbps ?? null;
 
     // 2. Transaction: create commercial_change row + audit log.
     //    Account state is INTENTIONALLY NOT updated here. The account row
     //    only mirrors the change once CRM moves the order to COMPLETED —
     //    until then SAM should reflect what CRM is actually billing, not
-    //    what the operator submitted. See applyChangeToAccountIfReady().
+    //    what the operator submitted. See applyChangeToAccount().
     const result = await prisma.$transaction(async (tx) => {
       const change = await tx.commercialChange.create({
         data: {
           id: commercialChangeId,
           accountId: input.accountId,
           changeType: input.changeType,
-          oldMrr,
-          newMrr: input.newMrr,
+          oldArc,
+          newArc: input.newArc,
           effectiveDate: input.effectiveDate,
           clientApprovalAttached: true,
           approvalFileUrl: approvalUpload.secureUrl,
@@ -135,8 +140,8 @@ export const commercialChangesService = {
           payload: {
             accountId: input.accountId,
             changeType: input.changeType,
-            oldMrr,
-            newMrr: input.newMrr,
+            oldArc,
+            newArc: input.newArc,
             effectiveDate: input.effectiveDate.toISOString(),
             approvalFileUrl: approvalUpload.secureUrl,
             approvalFilePublicId: approvalUpload.publicId,
@@ -150,14 +155,6 @@ export const commercialChangesService = {
     });
 
     // 3. Forward to CRM as a service order (gated by CRM_SERVICE_ORDERS_ENABLED).
-    //    CRM has the multi-team workflow (Docs → NOC → Accounts); SAM just
-    //    fires the create. We persist the returned id + orderNumber + status
-    //    onto the SAM row so the user can track progress and refresh.
-    //
-    //    NOTE: account.currentMrr was already updated optimistically above.
-    //    If CRM rejects the order, the SAM row stays without crmServiceOrderId
-    //    and the SAM operator can manually retry submission later (or undo
-    //    via a fresh commercial change — Phase 2 work).
     const crmEnabled = process.env.CRM_SERVICE_ORDERS_ENABLED === 'true';
     let crm: CommitResult['crm'];
     let crmServiceOrderId: string | null = null;
@@ -210,10 +207,26 @@ export const commercialChangesService = {
       account,
       samOwnerName: performingUser.name,
       changeType: input.changeType,
-      oldMrr,
-      newMrr: input.newMrr,
+      oldArc,
+      newArc: input.newArc,
       effectiveDate: input.effectiveDate,
       reason: input.reason,
+    });
+
+    // Fire the accounts-team notification. Best-effort — failure is logged
+    // (in audit_logs) but never bubbles up. While the email transport is a
+    // stub this returns 'skipped' or 'failed'; once the real transport is
+    // plugged in via getEmailClient(), this becomes a real delivery.
+    await sendCommercialChangeAlert({
+      commercialChangeId: result.id,
+      account,
+      changeType: input.changeType,
+      oldArc,
+      newArc: input.newArc,
+      effectiveDate: input.effectiveDate,
+      samOwnerName: performingUser.name,
+      reason: input.reason,
+      performedByUserId: input.performedByUserId,
     });
 
     return {
@@ -221,8 +234,8 @@ export const commercialChangesService = {
         id: result.id,
         accountId: result.accountId,
         changeType: result.changeType,
-        oldMrr: Number(result.oldMrr),
-        newMrr: Number(result.newMrr),
+        oldArc: Number(result.oldArc),
+        newArc: Number(result.newArc),
         effectiveDate: result.effectiveDate.toISOString(),
         approvalFileUrl: approvalUpload.secureUrl,
         approvalFilePublicId: approvalUpload.publicId,
@@ -272,7 +285,18 @@ export const commercialChangesService = {
   async refreshCrmStatus(commercialChangeId: string) {
     const change = await prisma.commercialChange.findUnique({
       where: { id: commercialChangeId },
-      include: { account: { select: { externalCrmId: true } } },
+      include: {
+        account: {
+          select: {
+            externalCrmId: true,
+            clientName: true,
+            companyName: true,
+            customerCode: true,
+            circuitId: true,
+            samOwnerId: true,
+          },
+        },
+      },
     });
     if (!change) throw new Error('Commercial change not found');
     if (!change.crmServiceOrderId || !change.account.externalCrmId) {
@@ -285,6 +309,7 @@ export const commercialChangesService = {
     const order = orders.find((o) => o.id === change.crmServiceOrderId);
     if (!order) return change;
 
+    const previousStatus = change.crmStatus;
     const updated = await prisma.commercialChange.update({
       where: { id: commercialChangeId },
       data: {
@@ -293,6 +318,28 @@ export const commercialChangesService = {
         activationDate: order.activationDate ? new Date(order.activationDate) : null,
       },
     });
+
+    // Fire status-transition notifications BEFORE the account-mirror step
+    // so the SAM is alerted even if the apply step fails.
+    if (
+      previousStatus !== order.status &&
+      (order.status === 'PENDING_SAM_ACTIVATION' || order.status === 'COMPLETED')
+    ) {
+      await sendCrmStatusChangeAlert({
+        commercialChangeId,
+        kind: order.status,
+        account: change.account,
+        changeType: change.changeType,
+        oldArc: Number(change.oldArc),
+        newArc: Number(change.newArc),
+        crmOrderNumber: change.crmOrderNumber,
+        // The actor here is technically the operator who hit "refresh",
+        // but we don't have their id in this scope. Stamp the SAM owner
+        // (or system uuid for unassigned customers) — keeps audit-trail
+        // queryable per-SAM.
+        performedByUserId: change.account.samOwnerId ?? '00000000-0000-0000-0000-000000000000',
+      });
+    }
 
     // CRM has finished — mirror the change onto the account row exactly once.
     if (updated.crmStatus === 'COMPLETED' && !updated.accountAppliedAt) {
@@ -341,8 +388,8 @@ export const commercialChangesService = {
  * commercial_changes.account_applied_at marker — calling this twice on the
  * same row is a no-op the second time.
  *
- *  - UPGRADE / DOWNGRADE / RATE_REVISION → set currentMrr + bandwidthMbps
- *  - DISCONNECTION                       → set contractStatus=TERMINATED + currentMrr=0
+ *  - UPGRADE / DOWNGRADE / RATE_REVISION → set currentArc + bandwidthMbps
+ *  - DISCONNECTION                       → set contractStatus=TERMINATED + currentArc=0
  *
  * Wraps the account update + accountAppliedAt stamp in a single transaction
  * so a crash mid-way can't leave the account updated without the marker
@@ -358,9 +405,9 @@ async function applyChangeToAccount(commercialChangeId: string) {
 
     const isTermination = change.changeType === 'DISCONNECTION';
     const accountUpdate: Prisma.AccountUpdateInput = isTermination
-      ? { contractStatus: 'TERMINATED', currentMrr: 0 }
+      ? { contractStatus: 'TERMINATED', currentArc: 0 }
       : {
-          currentMrr: Number(change.newMrr),
+          currentArc: Number(change.newArc),
           ...(change.newBandwidthMbps != null
             ? { bandwidthMbps: change.newBandwidthMbps }
             : {}),
@@ -413,8 +460,8 @@ function buildServiceOrderInput(
     return base;
   }
 
-  // UPGRADE / DOWNGRADE / RATE_REVISION — CRM expects ANNUAL ARC, not monthly.
-  base.newArc = Math.round(input.newMrr * 12);
+  // UPGRADE / DOWNGRADE / RATE_REVISION — CRM expects ANNUAL ARC.
+  base.newArc = Math.round(input.newArc);
   if (input.newBandwidthMbps != null) base.newBandwidth = input.newBandwidthMbps;
   base.effectiveDate = input.effectiveDate.toISOString();
   return base;

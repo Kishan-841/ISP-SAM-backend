@@ -38,7 +38,6 @@ export function fyQuarterRange(
 export type NewBaseMetrics = {
   // Headline
   totalCustomers: number;
-  totalNewMrrLakh: number;
   totalNewArcLakh: number;
 
   // Velocity (by onboardingDate)
@@ -64,7 +63,7 @@ export type NewBaseMetrics = {
     companyName: string | null;
     customerCode: string | null;
     onboardingDate: string;
-    /** Annualised Recurring Contribution, lakh-denominated. ARC = currentMrr × 12. */
+    /** Annualised Recurring Contribution, lakh-denominated. */
     currentArcLakh: number;
     contractStatus: string;
   }>;
@@ -74,7 +73,6 @@ export type ExistingBaseMetrics = {
   // Row 1 — backed by real data
   totalCustomers: number;
   totalBaseArcLakh: number;
-  totalBaseMrrLakh: number;
   currentCustomers: number;
   currentArcLakh: number;
   terminatedCount: number;
@@ -95,17 +93,17 @@ export const dashboardService = {
       where: { kittyType: 'BASE' },
       select: {
         id: true,
-        currentMrr: true,
-        startOfPeriodMrr: true,
+        currentArc: true,
+        startOfPeriodArc: true,
         contractStatus: true,
       },
     });
 
     const totalCustomers = baseAccounts.length;
-    // Start-of-period MRR uses the snapshot, falling back to currentMrr for legacy
-    // rows that pre-date the B1 import (where startOfPeriodMrr is null).
-    const startOfPeriodMrrSum = baseAccounts.reduce(
-      (sum, a) => sum + Number(a.startOfPeriodMrr ?? a.currentMrr),
+    // Start-of-period ARC uses the snapshot, falling back to currentArc for legacy
+    // rows that pre-date the B1 import (where startOfPeriodArc is null).
+    const startOfPeriodArcSum = baseAccounts.reduce(
+      (sum, a) => sum + Number(a.startOfPeriodArc ?? a.currentArc),
       0,
     );
 
@@ -125,8 +123,8 @@ export const dashboardService = {
             where: changeWhere,
             select: {
               changeType: true,
-              oldMrr: true,
-              newMrr: true,
+              oldArc: true,
+              newArc: true,
             },
           });
 
@@ -140,24 +138,24 @@ export const dashboardService = {
     let terminationsArcLost = 0;
 
     for (const c of changes) {
-      const oldM = Number(c.oldMrr);
-      const newM = Number(c.newMrr);
+      const oldA = Number(c.oldArc);
+      const newA = Number(c.newArc);
       switch (c.changeType) {
         case 'UPGRADE':
           upgradesCount++;
-          upgradesArcAdded += (newM - oldM) * 12;
+          upgradesArcAdded += newA - oldA;
           break;
         case 'DOWNGRADE':
           downgradesCount++;
-          downgradesArcReduced += (oldM - newM) * 12;
+          downgradesArcReduced += oldA - newA;
           break;
         case 'RATE_REVISION':
           rateRevsCount++;
-          rateRevsArcChange += (oldM - newM) * 12; // positive magnitude
+          rateRevsArcChange += oldA - newA; // positive magnitude
           break;
         case 'DISCONNECTION':
           terminationsCount++;
-          terminationsArcLost += oldM * 12;
+          terminationsArcLost += oldA;
           break;
       }
     }
@@ -168,7 +166,7 @@ export const dashboardService = {
     //      may not have a corresponding commercial_change row.
     //    - Quarter filter: replay window deltas on top of the start snapshot
     //      to project end-of-quarter ARC + customer count.
-    const startArc = startOfPeriodMrrSum * 12;
+    const startArc = startOfPeriodArcSum;
     let currentArc: number;
     let currentCustomers: number;
     let terminatedCount: number;
@@ -181,7 +179,7 @@ export const dashboardService = {
     } else {
       const liveActive = baseAccounts.filter((a) => a.contractStatus !== 'TERMINATED');
       const liveTerminated = baseAccounts.length - liveActive.length;
-      currentArc = liveActive.reduce((sum, a) => sum + Number(a.currentMrr), 0) * 12;
+      currentArc = liveActive.reduce((sum, a) => sum + Number(a.currentArc), 0);
       currentCustomers = liveActive.length;
       terminatedCount = liveTerminated;
     }
@@ -189,7 +187,6 @@ export const dashboardService = {
     return {
       totalCustomers,
       totalBaseArcLakh: round1(startArc / LAKH),
-      totalBaseMrrLakh: round1(startOfPeriodMrrSum / LAKH),
       currentCustomers,
       currentArcLakh: round1(currentArc / LAKH),
       terminatedCount,
@@ -270,7 +267,7 @@ export async function computeNewBase(
       clientName: true,
       companyName: true,
       customerCode: true,
-      currentMrr: true,
+      currentArc: true,
       contractStatus: true,
       onboardingDate: true,
     },
@@ -281,8 +278,7 @@ export async function computeNewBase(
 
   // Headline
   const totalCustomers = active.length;
-  const totalNewMrr = active.reduce((s, a) => s + Number(a.currentMrr), 0);
-  const totalNewArc = totalNewMrr * 12;
+  const totalNewArc = active.reduce((s, a) => s + Number(a.currentArc), 0);
 
   // Velocity windows
   const monthStart   = startOfMonthUTC(now);
@@ -293,7 +289,7 @@ export async function computeNewBase(
     const within = active.filter(
       (a) => startOfDayUTC(a.onboardingDate) >= since,
     );
-    const arc = within.reduce((s, a) => s + Number(a.currentMrr) * 12, 0);
+    const arc = within.reduce((s, a) => s + Number(a.currentArc), 0);
     return { count: within.length, arcLakh: round1(arc / LAKH) };
   };
 
@@ -354,8 +350,8 @@ export async function computeNewBase(
           select: {
             accountId: true,
             changeType: true,
-            oldMrr: true,
-            newMrr: true,
+            oldArc: true,
+            newArc: true,
             effectiveDate: true,
           },
         });
@@ -373,7 +369,7 @@ export async function computeNewBase(
     if (days < 0) continue;
     if (c.changeType === 'UPGRADE' && days <= EARLY_GROWTH_DAYS) {
       earlyUpgradesCount++;
-      earlyUpgradesArcAdded += (Number(c.newMrr) - Number(c.oldMrr)) * 12;
+      earlyUpgradesArcAdded += Number(c.newArc) - Number(c.oldArc);
     }
     if (c.changeType === 'RATE_REVISION' && days <= EARLY_HANDOVER_DAYS) {
       immediateRateRevisions++;
@@ -390,13 +386,12 @@ export async function computeNewBase(
     companyName: a.companyName,
     customerCode: a.customerCode,
     onboardingDate: a.onboardingDate.toISOString().slice(0, 10),
-    currentArcLakh: round1((Number(a.currentMrr) * 12) / LAKH),
+    currentArcLakh: round1(Number(a.currentArc) / LAKH),
     contractStatus: a.contractStatus,
   }));
 
   return {
     totalCustomers,
-    totalNewMrrLakh: round1(totalNewMrr / LAKH),
     totalNewArcLakh: round1(totalNewArc / LAKH),
     addedThisMonth,
     addedThisQuarter,

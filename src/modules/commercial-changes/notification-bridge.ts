@@ -16,12 +16,12 @@ export function buildAccountsTeamDraft(opts: {
   account: Pick<Account, 'clientName' | 'customerCode' | 'circuitId' | 'samOwnerId'>;
   samOwnerName: string;
   changeType: CommercialChangeType;
-  oldMrr: number;
-  newMrr: number;
+  oldArc: number;
+  newArc: number;
   effectiveDate: Date;
   reason: string | null;
 }): EmailDraft {
-  const delta = opts.newMrr - opts.oldMrr;
+  const delta = opts.newArc - opts.oldArc;
   const sign = delta > 0 ? '+' : '';
   const subject = `Commercial Change Alert – ${opts.account.clientName}`;
   const body = [
@@ -31,8 +31,8 @@ export function buildAccountsTeamDraft(opts: {
     `Customer Code:      ${opts.account.customerCode ?? '—'}`,
     `Circuit ID:         ${opts.account.circuitId ?? '—'}`,
     `Change Type:        ${TYPE_LABEL[opts.changeType]}`,
-    `Old MRR:            ₹${opts.oldMrr.toLocaleString('en-IN')}`,
-    `New MRR:            ₹${opts.newMrr.toLocaleString('en-IN')}`,
+    `Old ARC:            ₹${opts.oldArc.toLocaleString('en-IN')}`,
+    `New ARC:            ₹${opts.newArc.toLocaleString('en-IN')}`,
     `Delta:              ${sign}₹${delta.toLocaleString('en-IN')}`,
     `Effective Date:     ${opts.effectiveDate.toISOString().slice(0, 10)}`,
     `SAM Owner:          ${opts.samOwnerName}`,

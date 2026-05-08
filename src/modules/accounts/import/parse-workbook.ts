@@ -46,13 +46,22 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
         metadata[header] = value;
         continue;
       }
-      if (key === 'currentMrr' || key === 'currentArc') {
+      if (key === 'currentArc') {
         const n = parseNumber(value);
         if (n === null) {
           errors.push({ rowNumber: i + 1, reason: `Invalid number for ${header}: ${String(value)}` });
           continue;
         }
-        canonical[key] = n;
+        canonical.currentArc = n;
+      } else if (key === '__monthlyMrrLegacy') {
+        // Legacy monthly MRR header — convert to annual at the boundary.
+        // Don't overwrite an explicit ARC column on the same row.
+        const n = parseNumber(value);
+        if (n === null) {
+          errors.push({ rowNumber: i + 1, reason: `Invalid number for ${header}: ${String(value)}` });
+          continue;
+        }
+        if (canonical.currentArc === undefined) canonical.currentArc = n * 12;
       } else if (key === 'bandwidthMbps') {
         const n = parseInt(String(value).replace(/[^0-9]/g, ''), 10);
         if (Number.isFinite(n)) canonical[key] = n;

@@ -33,9 +33,9 @@ describe('GET /dashboard/existing-base', () => {
   it('aggregates BASE accounts correctly (8 customers, 76L ARC)', async () => {
     const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
     const token = await tokenFor(admin.id, 'ADMIN');
-    // 8 BASE accounts, average ₹79,166/month → ₹6.33L total MRR → ₹76L ARC
+    // 8 BASE accounts at ₹9.5L ARC each → ₹76L total ARC
     for (let i = 0; i < 8; i++) {
-      await seedAccount({ kittyType: 'BASE', currentMrr: 79166.67, contractStatus: 'ACTIVE' });
+      await seedAccount({ kittyType: 'BASE', currentArc: 950000, contractStatus: 'ACTIVE' });
     }
     const res = await authedGet(app, '/dashboard/existing-base', token);
     expect(res.body.totalCustomers).toBe(8);
@@ -47,18 +47,18 @@ describe('GET /dashboard/existing-base', () => {
   it('excludes NEW kitty accounts from BASE totals', async () => {
     const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
     const token = await tokenFor(admin.id, 'ADMIN');
-    await seedAccount({ kittyType: 'BASE', currentMrr: 100000 });
-    await seedAccount({ kittyType: 'NEW', currentMrr: 500000, onboardingDate: new Date('2026-04-15') });
+    await seedAccount({ kittyType: 'BASE', currentArc: 1200000 });
+    await seedAccount({ kittyType: 'NEW', currentArc: 6000000, onboardingDate: new Date('2026-04-15') });
     const res = await authedGet(app, '/dashboard/existing-base', token);
     expect(res.body.totalCustomers).toBe(1);
-    expect(res.body.totalBaseArcLakh).toBe(12); // 100000 * 12 / 100000 = 12L
+    expect(res.body.totalBaseArcLakh).toBe(12); // 1200000 / 100000 = 12L
   });
 
   it('drops terminated BASE accounts from current totals', async () => {
     const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
     const token = await tokenFor(admin.id, 'ADMIN');
-    await seedAccount({ kittyType: 'BASE', currentMrr: 100000, contractStatus: 'ACTIVE' });
-    await seedAccount({ kittyType: 'BASE', currentMrr: 100000, contractStatus: 'TERMINATED' });
+    await seedAccount({ kittyType: 'BASE', currentArc: 1200000, contractStatus: 'ACTIVE' });
+    await seedAccount({ kittyType: 'BASE', currentArc: 1200000, contractStatus: 'TERMINATED' });
     const res = await authedGet(app, '/dashboard/existing-base', token);
     expect(res.body.totalCustomers).toBe(2);          // both counted in start-of-period
     expect(res.body.currentCustomers).toBe(1);        // only the non-terminated one is current
@@ -73,15 +73,15 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
     const acct = await seedAccount({
       kittyType: 'BASE',
-      currentMrr: 60000,
-      startOfPeriodMrr: 50000,
+      currentArc: 720000,
+      startOfPeriodArc: 600000,
     });
     await prisma.commercialChange.create({
       data: {
         accountId: acct.id,
         changeType: 'UPGRADE',
-        oldMrr: 50000,
-        newMrr: 60000,
+        oldArc: 600000,
+        newArc: 720000,
         effectiveDate: new Date('2026-04-15'),
         clientApprovalAttached: true,
         createdBy: admin.id,
@@ -91,7 +91,7 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     const token = await tokenFor(admin.id, 'ADMIN');
     const res = await authedGet(app, '/dashboard/existing-base', token);
     expect(res.body.upgrades.count).toBe(1);
-    // (60000 - 50000) * 12 = 120000 = 1.2L
+    // 720000 - 600000 = 120000 = 1.2L
     expect(res.body.upgrades.arcAddedLakh).toBeCloseTo(1.2, 1);
   });
 
@@ -99,15 +99,15 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
     const acct = await seedAccount({
       kittyType: 'BASE',
-      currentMrr: 40000,
-      startOfPeriodMrr: 50000,
+      currentArc: 480000,
+      startOfPeriodArc: 600000,
     });
     await prisma.commercialChange.create({
       data: {
         accountId: acct.id,
         changeType: 'DOWNGRADE',
-        oldMrr: 50000,
-        newMrr: 40000,
+        oldArc: 600000,
+        newArc: 480000,
         effectiveDate: new Date('2026-04-15'),
         clientApprovalAttached: true,
         createdBy: admin.id,
@@ -117,7 +117,7 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     const token = await tokenFor(admin.id, 'ADMIN');
     const res = await authedGet(app, '/dashboard/existing-base', token);
     expect(res.body.downgrades.count).toBe(1);
-    // (50000 - 40000) * 12 = 120000 = 1.2L
+    // 600000 - 480000 = 120000 = 1.2L
     expect(res.body.downgrades.arcReducedLakh).toBeCloseTo(1.2, 1);
   });
 
@@ -125,16 +125,16 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
     const acct = await seedAccount({
       kittyType: 'BASE',
-      currentMrr: 0,
-      startOfPeriodMrr: 100000,
+      currentArc: 0,
+      startOfPeriodArc: 1200000,
       contractStatus: 'TERMINATED',
     });
     await prisma.commercialChange.create({
       data: {
         accountId: acct.id,
         changeType: 'DISCONNECTION',
-        oldMrr: 100000,
-        newMrr: 0,
+        oldArc: 1200000,
+        newArc: 0,
         effectiveDate: new Date('2026-04-15'),
         clientApprovalAttached: true,
         createdBy: admin.id,
@@ -144,7 +144,7 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     const token = await tokenFor(admin.id, 'ADMIN');
     const res = await authedGet(app, '/dashboard/existing-base', token);
     expect(res.body.terminations.count).toBe(1);
-    // 100000 * 12 = 1200000 = 12L
+    // 1200000 = 12L
     expect(res.body.terminations.arcLostLakh).toBeCloseTo(12, 0);
   });
 
@@ -152,15 +152,15 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
     const acct = await seedAccount({
       kittyType: 'BASE',
-      currentMrr: 48000,
-      startOfPeriodMrr: 50000,
+      currentArc: 576000,
+      startOfPeriodArc: 600000,
     });
     await prisma.commercialChange.create({
       data: {
         accountId: acct.id,
         changeType: 'RATE_REVISION',
-        oldMrr: 50000,
-        newMrr: 48000,
+        oldArc: 600000,
+        newArc: 576000,
         effectiveDate: new Date('2026-04-15'),
         clientApprovalAttached: true,
         createdBy: admin.id,
@@ -170,7 +170,7 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     const token = await tokenFor(admin.id, 'ADMIN');
     const res = await authedGet(app, '/dashboard/existing-base', token);
     expect(res.body.rateRevisions.count).toBe(1);
-    // (50000 - 48000) * 12 = 24000 = 0.24L → rounded to 1 decimal = 0.2L
+    // 600000 - 576000 = 24000 = 0.24L → rounded to 1 decimal = 0.2L
     expect(res.body.rateRevisions.arcChangeLakh).toBeCloseTo(0.2, 1);
   });
 
@@ -178,16 +178,16 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
     const newAcct = await seedAccount({
       kittyType: 'NEW',
-      currentMrr: 60000,
-      startOfPeriodMrr: 50000,
+      currentArc: 720000,
+      startOfPeriodArc: 600000,
       onboardingDate: new Date('2026-04-15'),
     });
     await prisma.commercialChange.create({
       data: {
         accountId: newAcct.id,
         changeType: 'UPGRADE',
-        oldMrr: 50000,
-        newMrr: 60000,
+        oldArc: 600000,
+        newArc: 720000,
         effectiveDate: new Date('2026-04-20'),
         clientApprovalAttached: true,
         createdBy: admin.id,
@@ -200,21 +200,20 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     expect(res.body.upgrades.arcAddedLakh).toBe(0);
   });
 
-  it('totalBaseArcLakh now reads from startOfPeriodMrr (not currentMrr)', async () => {
+  it('totalBaseArcLakh now reads from startOfPeriodArc (not currentArc)', async () => {
     const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
-    // Account was onboarded at MRR 50k, then upgraded to 60k.
+    // Account was onboarded at ARC 6L, then upgraded to 7.2L.
     await seedAccount({
       kittyType: 'BASE',
-      currentMrr: 60000,
-      startOfPeriodMrr: 50000,
+      currentArc: 720000,
+      startOfPeriodArc: 600000,
     });
 
     const token = await tokenFor(admin.id, 'ADMIN');
     const res = await authedGet(app, '/dashboard/existing-base', token);
-    // Start-of-period ARC reflects the original 50k baseline, not the 60k current.
-    // 50000 * 12 = 600000 = 6L
+    // Start-of-period ARC reflects the original 6L baseline, not the 7.2L current.
     expect(res.body.totalBaseArcLakh).toBeCloseTo(6, 1);
-    // Current ARC reflects the 60k post-upgrade.
+    // Current ARC reflects the 7.2L post-upgrade.
     expect(res.body.currentArcLakh).toBeCloseTo(7.2, 1);
   });
 });
@@ -224,22 +223,22 @@ describe('GET /dashboard/existing-base — quarter filter', () => {
     admin: { id: string };
     changeType: 'UPGRADE' | 'DOWNGRADE' | 'RATE_REVISION' | 'DISCONNECTION';
     effectiveDate: Date;
-    oldMrr?: number;
-    newMrr?: number;
+    oldArc?: number;
+    newArc?: number;
   }) {
-    const oldMrr = opts.oldMrr ?? 50000;
-    const newMrr = opts.newMrr ?? 60000;
+    const oldArc = opts.oldArc ?? 600000;
+    const newArc = opts.newArc ?? 720000;
     const acct = await seedAccount({
       kittyType: 'BASE',
-      currentMrr: newMrr,
-      startOfPeriodMrr: oldMrr,
+      currentArc: newArc,
+      startOfPeriodArc: oldArc,
     });
     await prisma.commercialChange.create({
       data: {
         accountId: acct.id,
         changeType: opts.changeType,
-        oldMrr,
-        newMrr,
+        oldArc,
+        newArc,
         effectiveDate: opts.effectiveDate,
         clientApprovalAttached: true,
         createdBy: opts.admin.id,
@@ -254,7 +253,7 @@ describe('GET /dashboard/existing-base — quarter filter', () => {
     // Q1 upgrade
     await seedAcctWithChange({ admin, changeType: 'UPGRADE', effectiveDate: new Date('2026-05-15') });
     // Q3 upgrade — must not appear under Q1
-    await seedAcctWithChange({ admin, changeType: 'UPGRADE', effectiveDate: new Date('2026-11-15'), oldMrr: 70000, newMrr: 90000 });
+    await seedAcctWithChange({ admin, changeType: 'UPGRADE', effectiveDate: new Date('2026-11-15'), oldArc: 840000, newArc: 1080000 });
 
     const q1 = await authedGet(app, '/dashboard/existing-base?quarter=Q1', token);
     expect(q1.body.upgrades.count).toBe(1);
@@ -262,7 +261,7 @@ describe('GET /dashboard/existing-base — quarter filter', () => {
 
     const q3 = await authedGet(app, '/dashboard/existing-base?quarter=Q3', token);
     expect(q3.body.upgrades.count).toBe(1);
-    // (90000 - 70000) * 12 = 240000 = 2.4L
+    // 1080000 - 840000 = 240000 = 2.4L
     expect(q3.body.upgrades.arcAddedLakh).toBeCloseTo(2.4, 1);
 
     const q2 = await authedGet(app, '/dashboard/existing-base?quarter=Q2', token);
@@ -273,7 +272,7 @@ describe('GET /dashboard/existing-base — quarter filter', () => {
     const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
     const token = await tokenFor(admin.id, 'ADMIN');
     await seedAcctWithChange({ admin, changeType: 'UPGRADE', effectiveDate: new Date('2026-05-15') });
-    await seedAcctWithChange({ admin, changeType: 'UPGRADE', effectiveDate: new Date('2026-11-15'), oldMrr: 70000, newMrr: 90000 });
+    await seedAcctWithChange({ admin, changeType: 'UPGRADE', effectiveDate: new Date('2026-11-15'), oldArc: 840000, newArc: 1080000 });
 
     const res = await authedGet(app, '/dashboard/existing-base', token);
     expect(res.body.upgrades.count).toBe(2);
@@ -285,7 +284,7 @@ describe('GET /dashboard/existing-base — quarter filter', () => {
     const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
     const token = await tokenFor(admin.id, 'ADMIN');
     await seedAcctWithChange({ admin, changeType: 'UPGRADE', effectiveDate: new Date('2026-05-15') });
-    // Q1 view: start = 50k * 12 = 6L; +1.2L upgrade → currentArc = 7.2L
+    // Q1 view: start = 6L; +1.2L upgrade → currentArc = 7.2L
     const q1 = await authedGet(app, '/dashboard/existing-base?quarter=Q1', token);
     expect(q1.body.totalBaseArcLakh).toBeCloseTo(6, 1);
     expect(q1.body.currentArcLakh).toBeCloseTo(7.2, 1);

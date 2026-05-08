@@ -8,7 +8,7 @@ import type { AuthedRequest } from '../auth/auth.middleware.js';
 const bodySchema = z.object({
   accountId: z.string().uuid(),
   changeType: z.enum(['UPGRADE', 'DOWNGRADE', 'RATE_REVISION', 'DISCONNECTION']),
-  newMrr: z.coerce.number().nonnegative(),
+  newArc: z.coerce.number().nonnegative(),
   newBandwidthMbps: z.coerce.number().int().nonnegative().optional(),
   effectiveDate: z.string().refine((s) => !Number.isNaN(Date.parse(s)), 'Invalid date'),
   reason: z.string().optional(),
@@ -68,7 +68,7 @@ export const commercialChangesController = {
       const result = await commercialChangesService.commit({
         accountId: parse.data.accountId,
         changeType: parse.data.changeType,
-        newMrr: parse.data.newMrr,
+        newArc: parse.data.newArc,
         newBandwidthMbps: parse.data.newBandwidthMbps ?? null,
         effectiveDate: new Date(parse.data.effectiveDate),
         reason: parse.data.reason ?? null,

@@ -51,16 +51,16 @@ describe('GET /leaderboard', () => {
     // Sam1: BASE account, +20% MRR delta
     const a1 = await seedAccount({
       kittyType: 'BASE',
-      currentMrr: 12000,
-      startOfPeriodMrr: 10000,
+      currentArc: 144000,
+      startOfPeriodArc: 120000,
       samOwnerId: sam1.id,
     });
     await prisma.commercialChange.create({
       data: {
         accountId: a1.id,
         changeType: 'UPGRADE',
-        oldMrr: 10000,
-        newMrr: 12000,
+        oldArc: 120000,
+        newArc: 144000,
         effectiveDate: new Date('2026-04-15'),
         clientApprovalAttached: true,
         accountsNotifiedDate: new Date(),
@@ -71,8 +71,8 @@ describe('GET /leaderboard', () => {
     // Sam2: BASE account, flat
     await seedAccount({
       kittyType: 'BASE',
-      currentMrr: 10000,
-      startOfPeriodMrr: 10000,
+      currentArc: 120000,
+      startOfPeriodArc: 120000,
       samOwnerId: sam2.id,
     });
 
@@ -100,8 +100,8 @@ describe('GET /leaderboard', () => {
     const samGood = await seedUser({ email: 'good@x.com', name: 'Good', role: 'SAM' });
     const samBad = await seedUser({ email: 'bad@x.com', name: 'Bad', role: 'SAM' });
 
-    const aGood = await seedAccount({ kittyType: 'BASE', currentMrr: 10000, startOfPeriodMrr: 10000, samOwnerId: samGood.id });
-    const aBad = await seedAccount({ kittyType: 'BASE', currentMrr: 10000, startOfPeriodMrr: 10000, samOwnerId: samBad.id });
+    const aGood = await seedAccount({ kittyType: 'BASE', currentArc: 120000, startOfPeriodArc: 120000, samOwnerId: samGood.id });
+    const aBad = await seedAccount({ kittyType: 'BASE', currentArc: 120000, startOfPeriodArc: 120000, samOwnerId: samBad.id });
 
     // Good: held + mom sent within 12h
     await prisma.meeting.create({

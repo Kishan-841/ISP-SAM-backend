@@ -3,7 +3,7 @@ import type { ContractStatus } from '@prisma/client';
 export interface CrmAccount {
   externalCrmId: string;
   clientName: string;
-  currentMrr: number;
+  currentArc: number;
   contractStatus: ContractStatus;
   onboardingDate: Date;
   modifiedAt?: Date;

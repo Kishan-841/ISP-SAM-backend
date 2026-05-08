@@ -19,8 +19,6 @@ async function adminCookie() {
   return { token, user: admin };
 }
 
-const TODAY = new Date('2026-05-02T00:00:00Z'); // FY26-27, Q1, May
-
 describe('GET /dashboard/new-base', () => {
   it('401 without cookie', async () => {
     const res = await request(app).get('/dashboard/new-base');
@@ -32,7 +30,6 @@ describe('GET /dashboard/new-base', () => {
     const res = await authedGet(app, '/dashboard/new-base', token);
     expect(res.status).toBe(200);
     expect(res.body.totalCustomers).toBe(0);
-    expect(res.body.totalNewMrrLakh).toBe(0);
     expect(res.body.totalNewArcLakh).toBe(0);
     expect(res.body.recentAdditions).toEqual([]);
     expect(res.body.avgTimeToFirstMomDays).toBeNull();
@@ -41,22 +38,21 @@ describe('GET /dashboard/new-base', () => {
   it('counts only NEW-kitty accounts that are not terminated', async () => {
     const { token } = await adminCookie();
     // 2 NEW active, 1 NEW terminated, 1 BASE active — only the 2 should count.
-    await seedAccount({ kittyType: 'NEW', currentMrr: 25000, contractStatus: 'ACTIVE', onboardingDate: new Date('2026-04-15') });
-    await seedAccount({ kittyType: 'NEW', currentMrr: 50000, contractStatus: 'ACTIVE', onboardingDate: new Date('2026-04-20') });
-    await seedAccount({ kittyType: 'NEW', currentMrr: 99000, contractStatus: 'TERMINATED', onboardingDate: new Date('2026-04-10') });
-    await seedAccount({ kittyType: 'BASE', currentMrr: 80000, contractStatus: 'ACTIVE', onboardingDate: new Date('2025-04-01') });
+    await seedAccount({ kittyType: 'NEW', currentArc: 300000, contractStatus: 'ACTIVE', onboardingDate: new Date('2026-04-15') });
+    await seedAccount({ kittyType: 'NEW', currentArc: 600000, contractStatus: 'ACTIVE', onboardingDate: new Date('2026-04-20') });
+    await seedAccount({ kittyType: 'NEW', currentArc: 1188000, contractStatus: 'TERMINATED', onboardingDate: new Date('2026-04-10') });
+    await seedAccount({ kittyType: 'BASE', currentArc: 960000, contractStatus: 'ACTIVE', onboardingDate: new Date('2025-04-01') });
 
     const res = await authedGet(app, '/dashboard/new-base', token);
     expect(res.status).toBe(200);
     expect(res.body.totalCustomers).toBe(2);
-    expect(res.body.totalNewMrrLakh).toBeCloseTo(0.8, 1); // 75,000 / 100,000
-    expect(res.body.totalNewArcLakh).toBeCloseTo(9, 0);   // 75,000 * 12 / 100,000
+    expect(res.body.totalNewArcLakh).toBeCloseTo(9, 0);   // (300000 + 600000) / 100000 = 9L
   });
 
   it('flags customers with no meeting (§4.6 SAM failure indicator)', async () => {
     const { token, user } = await adminCookie();
-    const a = await seedAccount({ kittyType: 'NEW', currentMrr: 10000, onboardingDate: new Date('2026-04-15') });
-    const b = await seedAccount({ kittyType: 'NEW', currentMrr: 10000, onboardingDate: new Date('2026-04-20') });
+    const a = await seedAccount({ kittyType: 'NEW', currentArc: 120000, onboardingDate: new Date('2026-04-15') });
+    const b = await seedAccount({ kittyType: 'NEW', currentArc: 120000, onboardingDate: new Date('2026-04-20') });
     // Only `a` has a meeting; `b` does not.
     await prisma.meeting.create({
       data: {
@@ -79,7 +75,7 @@ describe('GET /dashboard/new-base', () => {
     const { token, user } = await adminCookie();
     const acct = await seedAccount({
       kittyType: 'NEW',
-      currentMrr: 50000,
+      currentArc: 600000,
       onboardingDate: new Date('2026-04-01'),
     });
     // Rate revision 30 days post-onboarding → flagged
@@ -87,8 +83,8 @@ describe('GET /dashboard/new-base', () => {
       data: {
         accountId: acct.id,
         changeType: 'RATE_REVISION',
-        oldMrr: 50000,
-        newMrr: 45000,
+        oldArc: 600000,
+        newArc: 540000,
         effectiveDate: new Date('2026-05-01'),
         clientApprovalAttached: true,
         createdBy: user.id,
@@ -99,8 +95,8 @@ describe('GET /dashboard/new-base', () => {
       data: {
         accountId: acct.id,
         changeType: 'DOWNGRADE',
-        oldMrr: 45000,
-        newMrr: 30000,
+        oldArc: 540000,
+        newArc: 360000,
         effectiveDate: new Date('2026-06-30'),
         clientApprovalAttached: true,
         createdBy: user.id,
@@ -116,7 +112,7 @@ describe('GET /dashboard/new-base', () => {
     const { token, user } = await adminCookie();
     const acct = await seedAccount({
       kittyType: 'NEW',
-      currentMrr: 80000,
+      currentArc: 960000,
       onboardingDate: new Date('2026-04-01'),
     });
     // Upgrade 60 days post-onboarding → counted
@@ -124,8 +120,8 @@ describe('GET /dashboard/new-base', () => {
       data: {
         accountId: acct.id,
         changeType: 'UPGRADE',
-        oldMrr: 50000,
-        newMrr: 80000,
+        oldArc: 600000,
+        newArc: 960000,
         effectiveDate: new Date('2026-05-31'),
         clientApprovalAttached: true,
         createdBy: user.id,
@@ -134,7 +130,7 @@ describe('GET /dashboard/new-base', () => {
 
     const res = await authedGet(app, '/dashboard/new-base', token);
     expect(res.body.earlyUpgrades.count).toBe(1);
-    // (80000 - 50000) * 12 / 100000 = 3.6 lakh
+    // (960000 - 600000) / 100000 = 3.6 lakh
     expect(res.body.earlyUpgrades.arcAddedLakh).toBeCloseTo(3.6, 1);
   });
 
@@ -144,7 +140,7 @@ describe('GET /dashboard/new-base', () => {
       await seedAccount({
         kittyType: 'NEW',
         clientName: `Customer ${i}`,
-        currentMrr: 10000 + i * 1000,
+        currentArc: 120000 + i * 12000,
         onboardingDate: new Date(`2026-04-${String(i + 1).padStart(2, '0')}`),
       });
     }

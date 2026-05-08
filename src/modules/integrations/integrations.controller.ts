@@ -15,18 +15,18 @@ const customerSchema = z
     circuitId: z.string().optional().nullable(),
     bandwidthMbps: z.number().int().positive().optional().nullable(),
     currentPlan: z.string().optional().nullable(),
-    // Either currentMrr (monthly) OR currentArc (annual) — at least one is
-    // required. CRM started sending currentArc explicitly; we still accept
-    // currentMrr for backwards compatibility with older payloads.
-    currentMrr: z.number().nonnegative().optional(),
+    // CRM sends `currentArc` (annual). `currentMrr` (monthly) is still
+    // accepted for backwards compatibility with older payloads — the service
+    // multiplies it by 12 at ingest. At least one must be provided.
     currentArc: z.number().nonnegative().optional(),
+    currentMrr: z.number().nonnegative().optional(),
     onboardingDate: z
       .string()
       .refine((s) => !Number.isNaN(Date.parse(s)), 'Invalid onboardingDate'),
   })
   .refine(
-    (c) => c.currentMrr !== undefined || c.currentArc !== undefined,
-    { message: 'Either currentMrr or currentArc must be provided', path: ['currentMrr'] },
+    (c) => c.currentArc !== undefined || c.currentMrr !== undefined,
+    { message: 'Either currentArc or currentMrr must be provided', path: ['currentArc'] },
   );
 
 const customerActivatedSchema = z.object({

@@ -52,9 +52,9 @@ export const importService = {
         if (dedupKey) {
           const existing = await prisma.account.findFirst({ where: dedupKey });
           if (existing) {
-            // On update path: don't overwrite startOfPeriodMrr (it's a snapshot
+            // On update path: don't overwrite startOfPeriodArc (it's a snapshot
             // at first-import time and the dashboard waterfall reads it).
-            const { startOfPeriodMrr: _ignored, ...updateData } = data;
+            const { startOfPeriodArc: _ignored, ...updateData } = data;
             await prisma.account.update({
               where: { id: existing.id },
               data: updateData,
@@ -78,8 +78,8 @@ export const importService = {
 type ValidatedData = {
   clientName: string;
   kittyType: 'BASE' | 'NEW';
-  currentMrr: number;
-  startOfPeriodMrr: number;
+  currentArc: number;
+  startOfPeriodArc: number;
   contractStatus: ContractStatus;
   onboardingDate: Date;
   companyName?: string | null;
@@ -95,13 +95,7 @@ function validate(row: ParsedRow): { error: string } | { data: ValidatedData } {
   const c = row.canonical;
   if (!c.clientName) return { error: 'Missing customer/client name' };
   if (!c.onboardingDate) return { error: 'Missing onboarding date' };
-
-  // currentMrr: prefer explicit MRR, else compute from ARC ÷ 12.
-  // MRR/ARC is required — rows without either are skipped.
-  let mrr: number;
-  if (typeof c.currentMrr === 'number') mrr = c.currentMrr;
-  else if (typeof c.currentArc === 'number') mrr = c.currentArc / 12;
-  else return { error: 'Missing MRR/ARC' };
+  if (typeof c.currentArc !== 'number') return { error: 'Missing ARC' };
 
   // contractStatus — accept aliases (e.g. "Closed" -> TERMINATED, "Live" -> ACTIVE).
   let status: ContractStatus = 'ACTIVE';
@@ -116,10 +110,10 @@ function validate(row: ParsedRow): { error: string } | { data: ValidatedData } {
     data: {
       clientName: c.clientName,
       kittyType: deriveKittyType(c.onboardingDate),
-      currentMrr: mrr,
+      currentArc: c.currentArc,
       // Snapshot at create-time. The update path strips this so re-imports
       // don't overwrite the original baseline.
-      startOfPeriodMrr: mrr,
+      startOfPeriodArc: c.currentArc,
       contractStatus: status,
       onboardingDate: c.onboardingDate,
       companyName: c.companyName ?? null,

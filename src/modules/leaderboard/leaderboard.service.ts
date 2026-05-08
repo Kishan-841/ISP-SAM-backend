@@ -41,8 +41,8 @@ export const leaderboardService = {
         samOwnerId: true,
         kittyType: true,
         contractStatus: true,
-        currentMrr: true,
-        startOfPeriodMrr: true,
+        currentArc: true,
+        startOfPeriodArc: true,
         onboardingDate: true,
       },
     });
@@ -54,8 +54,8 @@ export const leaderboardService = {
         select: {
           accountId: true,
           changeType: true,
-          oldMrr: true,
-          newMrr: true,
+          oldArc: true,
+          newArc: true,
           effectiveDate: true,
           clientApprovalAttached: true,
           accountsNotifiedDate: true,
@@ -84,14 +84,14 @@ export const leaderboardService = {
       const newAccounts = userAccounts.filter((a) => a.kittyType === 'NEW');
 
       // ----- Revenue (40%) -----
-      const startMrr = baseAccounts.reduce(
-        (s, a) => s + Number(a.startOfPeriodMrr ?? a.currentMrr),
+      const startArc = baseAccounts.reduce(
+        (s, a) => s + Number(a.startOfPeriodArc ?? a.currentArc),
         0,
       );
-      const currentMrr = baseAccounts
+      const currentArc = baseAccounts
         .filter((a) => a.contractStatus !== 'TERMINATED')
-        .reduce((s, a) => s + Number(a.currentMrr), 0);
-      const revenueDeltaPercent = startMrr > 0 ? ((currentMrr - startMrr) / startMrr) * 100 : 0;
+        .reduce((s, a) => s + Number(a.currentArc), 0);
+      const revenueDeltaPercent = startArc > 0 ? ((currentArc - startArc) / startArc) * 100 : 0;
 
       const upgradesCount = userChanges.filter((c) => c.changeType === 'UPGRADE').length;
       const downgradesCount = userChanges.filter((c) => c.changeType === 'DOWNGRADE').length;

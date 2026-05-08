@@ -43,7 +43,7 @@ model Account {
   kittyType       KittyType      @map("kitty_type")
   samOwnerId      String?        @map("sam_owner_id") @db.Uuid
   samOwner        User?          @relation("SamOwner", fields: [samOwnerId], references: [id], onDelete: SetNull)
-  currentMrr      Decimal        @map("current_mrr") @db.Decimal(12, 2)
+  currentArc      Decimal        @map("current_arc") @db.Decimal(12, 2)
   contractStatus  ContractStatus @map("contract_status")
   /// Maintained by Phase 3 meetings.service.ts on MOM-send / meeting-create.
   lastMomDate     DateTime?      @map("last_mom_date") @db.Date
@@ -60,7 +60,7 @@ model Account {
   customerCode       String?  @unique @map("customer_code")
   circuitId          String?  @unique @map("circuit_id")
   bandwidthMbps      Int?     @map("bandwidth_mbps")
-  startOfPeriodMrr   Decimal? @map("start_of_period_mrr") @db.Decimal(12, 2)
+  startOfPeriodArc   Decimal? @map("start_of_period_arc") @db.Decimal(12, 2)
   createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
 
   commercialChanges CommercialChange[]
@@ -75,8 +75,8 @@ model CommercialChange {
   id                     String               @id @default(uuid()) @db.Uuid
   accountId              String               @map("account_id") @db.Uuid
   changeType             CommercialChangeType @map("change_type")
-  oldMrr                 Decimal              @map("old_mrr") @db.Decimal(12, 2)
-  newMrr                 Decimal              @map("new_mrr") @db.Decimal(12, 2)
+  oldArc                 Decimal              @map("old_arc") @db.Decimal(12, 2)
+  newArc                 Decimal              @map("new_arc") @db.Decimal(12, 2)
   effectiveDate          DateTime             @map("effective_date") @db.Date
   clientApprovalAttached Boolean              @map("client_approval_attached")
   /// HTTPS URL to the approval file. Used to be a relative path on the SAM
@@ -161,9 +161,33 @@ model AuditLog {
   payload     Json?
   timestamp   DateTime @default(now()) @db.Timestamptz(6)
 
+  notificationStates NotificationState[]
+
   @@index([entityType, entityId])
   @@index([performedBy])
   @@map("audit_logs")
+}
+
+/// Per-user overlay for the notification feed. Audit log rows are global;
+/// this table records which user has read or dismissed which row. Dismissal
+/// is soft — it hides the notification from that user's feed but never
+/// touches the audit row itself.
+model NotificationState {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  auditLogId   String    @map("audit_log_id") @db.Uuid
+  readAt       DateTime? @map("read_at") @db.Timestamptz(6)
+  dismissedAt  DateTime? @map("dismissed_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  auditLog AuditLog @relation(fields: [auditLogId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, auditLogId])
+  @@index([userId, dismissedAt])
+  @@index([userId, readAt])
+  @@map("notification_states")
 }
 
 enum IntegrationStatus {
@@ -208,7 +232,8 @@ model User {
   reports      User[]   @relation("SamHeadHierarchy")
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  ownedAccounts Account[] @relation("SamOwner")
+  ownedAccounts      Account[]           @relation("SamOwner")
+  notificationStates NotificationState[]
 
   @@map("users")
 }

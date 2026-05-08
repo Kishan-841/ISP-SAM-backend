@@ -87,7 +87,7 @@ describe('POST /accounts/import', () => {
       .set('Cookie', cookie)
       .attach('file', fixture('missing-required.csv'), 'missing-required.csv');
     expect(res.status).toBe(200);
-    // MRR/ARC is required, so the missing-ARC row also fails.
+    // ARC is required, so the missing-ARC row also fails.
     // Row 2: missing name, Row 3: missing ARC, Row 4: missing date.
     expect(res.body.imported).toBe(0);
     expect(res.body.skipped).toBe(3);
@@ -138,7 +138,7 @@ describe('POST /accounts/import', () => {
     expect(acc.bandwidthMbps).toBe(100);
   });
 
-  it('sets startOfPeriodMrr on create equal to imported currentMrr', async () => {
+  it('sets startOfPeriodArc on create equal to imported currentArc', async () => {
     const cookie = await adminCookie();
     const res = await request(app)
       .post('/accounts/import')
@@ -148,7 +148,7 @@ describe('POST /accounts/import', () => {
     expect(res.body.imported).toBe(3);
     const list = await request(app).get('/accounts').set('Cookie', cookie);
     for (const acc of list.body.accounts) {
-      expect(Number(acc.startOfPeriodMrr)).toBe(Number(acc.currentMrr));
+      expect(Number(acc.startOfPeriodArc)).toBe(Number(acc.currentArc));
     }
   });
 

@@ -4,12 +4,16 @@
 //
 // All other columns get serialised under `metadata` keyed by the original
 // (verbatim) header.
+//
+// IMPORTANT: amounts are now ANNUAL ARC. Legacy "MRR"-named headers are still
+// accepted as a backwards-compat seam — the parser multiplies them by 12 so
+// the stored value is annual regardless of the source header.
 
 export type CanonicalRow = {
   clientName?: string;
   companyName?: string;
   mobileNumber?: string;
-  currentMrr?: number;
+  /** Annual ₹ — what the platform stores after this refactor. */
   currentArc?: number;
   contractStatus?: string;
   onboardingDate?: Date;
@@ -19,7 +23,13 @@ export type CanonicalRow = {
   bandwidthMbps?: number;
 };
 
-export const HEADER_SYNONYMS: Record<string, keyof CanonicalRow> = {
+/**
+ * Internal-only marker used by the parser. Headers labelled "MRR" map here
+ * and the parser multiplies them by 12 before populating `currentArc`.
+ */
+export type ParsedRowKey = keyof CanonicalRow | '__monthlyMrrLegacy';
+
+export const HEADER_SYNONYMS: Record<string, ParsedRowKey> = {
   // clientName
   clientname: 'clientName',
   customername: 'clientName',
@@ -43,23 +53,24 @@ export const HEADER_SYNONYMS: Record<string, keyof CanonicalRow> = {
   contactnumber: 'mobileNumber',
   phonenumber: 'mobileNumber',
 
-  // currentMrr (monthly)
-  mrr: 'currentMrr',
-  monthlymrr: 'currentMrr',
-  currentmrr: 'currentMrr',
-  monthlyrevenue: 'currentMrr',
-  monthlybill: 'currentMrr',
-  planprice: 'currentMrr',
-  subscriptionfee: 'currentMrr',
-  monthlycharge: 'currentMrr',
-  monthlyplan: 'currentMrr',
-  tariff: 'currentMrr',
-
-  // currentArc (annualized)  — converted to currentMrr (÷ 12) by parser
+  // currentArc (annualised) — canonical
   arc: 'currentArc',
   currentarc: 'currentArc',
   annualrevenue: 'currentArc',
   annualizedrevenue: 'currentArc',
+
+  // Legacy monthly MRR headers — multiplied × 12 at parse time so the
+  // stored value is always annual. Kept so old workbooks still import.
+  mrr: '__monthlyMrrLegacy',
+  monthlymrr: '__monthlyMrrLegacy',
+  currentmrr: '__monthlyMrrLegacy',
+  monthlyrevenue: '__monthlyMrrLegacy',
+  monthlybill: '__monthlyMrrLegacy',
+  planprice: '__monthlyMrrLegacy',
+  subscriptionfee: '__monthlyMrrLegacy',
+  monthlycharge: '__monthlyMrrLegacy',
+  monthlyplan: '__monthlyMrrLegacy',
+  tariff: '__monthlyMrrLegacy',
 
   // contractStatus
   status: 'contractStatus',
@@ -106,6 +117,6 @@ export function normalizeHeader(header: string): string {
     .replace(/[^a-z0-9]/g, ''); // strip spaces, underscores, dashes, parens, etc.
 }
 
-export function mapHeader(header: string): keyof CanonicalRow | null {
+export function mapHeader(header: string): ParsedRowKey | null {
   return HEADER_SYNONYMS[normalizeHeader(header)] ?? null;
 }

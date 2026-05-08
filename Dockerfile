@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1.7
-ARG NODE_VERSION=20
+# Node 22 is required because corepack picks up pnpm 11+, which uses the
+# node:sqlite built-in module that only exists in Node 22+. Pinning Node 20
+# crashes the container at boot with ERR_UNKNOWN_BUILTIN_MODULE: node:sqlite.
+ARG NODE_VERSION=22
 
 # ============================================================================
 # Stage 1: builder — install all deps, generate Prisma client, compile TS

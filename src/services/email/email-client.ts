@@ -19,8 +19,18 @@ import { NetcoreEmailClient } from './netcore-email-client.js';
  */
 
 export type EmailMessage = {
+  /**
+   * Per-message override for the From address. When unset, the client's
+   * configured default (e.g. NETCORE_FROM_EMAIL) is used. Use this to send
+   * AS a specific user — e.g. a SAM sending MOM to their customer.
+   * NOTE: domain must be verified in the transport provider.
+   */
+  from?: { email: string; name?: string };
   to: string;
   cc?: string[];
+  bcc?: string[];
+  /** Per-message Reply-To override. Falls back to client default. */
+  replyTo?: string;
   subject: string;
   /** Inline-styled HTML body. */
   html: string;

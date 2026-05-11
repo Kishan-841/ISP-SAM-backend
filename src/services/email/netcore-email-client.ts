@@ -55,9 +55,16 @@ export class NetcoreEmailClient implements EmailClient {
     if (message.cc && message.cc.length > 0) {
       personalization.cc = message.cc.map((email) => ({ email }));
     }
+    if (message.bcc && message.bcc.length > 0) {
+      personalization.bcc = message.bcc.map((email) => ({ email }));
+    }
+
+    const fromEmail = message.from?.email ?? this.fromEmail;
+    const fromName = message.from?.name ?? this.fromName;
+    const replyTo = message.replyTo ?? this.replyTo;
 
     const payload: Record<string, unknown> = {
-      from: { email: this.fromEmail, name: this.fromName },
+      from: { email: fromEmail, name: fromName },
       subject: message.subject,
       content: [
         { type: 'html', value: message.html },
@@ -65,8 +72,8 @@ export class NetcoreEmailClient implements EmailClient {
       ],
       personalizations: [personalization],
     };
-    if (this.replyTo) {
-      payload.reply_to = { email: this.replyTo };
+    if (replyTo) {
+      payload.reply_to = { email: replyTo };
     }
 
     let res: Response;

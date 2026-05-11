@@ -1,4 +1,4 @@
-import type { Account, CommercialChangeType, Prisma } from '@prisma/client';
+import type { Account, CommercialChangeType, MeetingType, Prisma } from '@prisma/client';
 import { prisma } from '../../prisma.js';
 import { getEmailClient, type EmailMessage, type SendResult } from './email-client.js';
 import { buildCommercialChangeAlertEmail } from './templates/commercial-change-alert.js';
@@ -8,6 +8,7 @@ import {
   buildCrmStatusChangeEmail,
   type CrmStatusChangeKind,
 } from './templates/crm-status-change.js';
+import { buildMomToCustomerEmail } from './templates/mom-to-customer.js';
 
 /**
  * One central place for every outbound notification the platform fires.
@@ -323,6 +324,90 @@ export async function sendCrmStatusChangeAlert(input: {
     },
     audit,
   });
+  return result.status === 'sent' ? { status: 'SENT' } : { status: 'FAILED' };
+}
+
+// ─── Event 6: MOM sent to the customer ────────────────────────────────
+
+export async function sendMomToCustomer(input: {
+  meetingId: string;
+  account: Pick<
+    Account,
+    'id' | 'clientName' | 'companyName' | 'customerCode' | 'circuitId' | 'email' | 'samOwnerId'
+  >;
+  meetingScheduledAt: Date;
+  meetingHeldAt: Date | null;
+  meetingType: MeetingType;
+  momContent: string;
+  performedByUserId: string;
+}): Promise<{ status: AuditOutcome }> {
+  const audit = {
+    entityType: 'Meeting',
+    entityId: input.meetingId,
+    action: 'NOTIFY_MOM_TO_CUSTOMER',
+    performedBy: input.performedByUserId,
+  };
+
+  if (!isEnabled()) {
+    await writeAudit(audit, 'SKIPPED', `${ENABLED_KEY} is not true`);
+    return { status: 'SKIPPED' };
+  }
+
+  const customerEmail = input.account.email?.trim();
+  if (!customerEmail) {
+    await writeAudit(audit, 'MISCONFIGURED', 'Account has no customer email on record');
+    return { status: 'MISCONFIGURED' };
+  }
+
+  // Owning SAM is the From: address (Reply-To-equivalent — customer replies
+  // go to them naturally). If the account is unassigned, we fall back to the
+  // system default sender, but still record who clicked submit.
+  const owningSam = input.account.samOwnerId
+    ? await prisma.user.findUnique({
+        where: { id: input.account.samOwnerId },
+        select: { id: true, name: true, email: true, samHead: { select: { email: true } } },
+      })
+    : null;
+
+  // Compose recipients.
+  const cc: string[] = [];
+  if (owningSam?.samHead?.email) cc.push(owningSam.samHead.email);
+  const accountsEmail = process.env.ACCOUNTS_TEAM_EMAIL?.trim();
+  if (accountsEmail) cc.push(accountsEmail);
+
+  const bcc: string[] = [];
+  if (owningSam?.email) bcc.push(owningSam.email);
+
+  const samName = owningSam?.name ?? 'Gazon SAM Team';
+  const { subject, html, text } = buildMomToCustomerEmail({
+    account: input.account,
+    samName,
+    meetingScheduledAt: input.meetingScheduledAt,
+    meetingHeldAt: input.meetingHeldAt,
+    meetingType: input.meetingType,
+    momContent: input.momContent,
+  });
+
+  const message: EmailMessage = {
+    to: customerEmail,
+    cc: cc.length > 0 ? Array.from(new Set(cc)) : undefined,
+    bcc: bcc.length > 0 ? bcc : undefined,
+    subject,
+    html,
+    text,
+    meta: {
+      meetingId: input.meetingId,
+      accountId: input.account.id,
+      samOwnerId: owningSam?.id ?? null,
+    },
+  };
+  // Send "as" the owning SAM when available — customer replies thread back
+  // to them. Domain must be Verified in the email provider.
+  if (owningSam?.email) {
+    message.from = { email: owningSam.email, name: samName };
+  }
+
+  const result = await dispatch({ message, audit });
   return result.status === 'sent' ? { status: 'SENT' } : { status: 'FAILED' };
 }
 

@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../prisma.js';
+import { sendMomToCustomer } from '../../services/email/notifications.service.js';
 
 export type ActionItem = {
   srNo: number;
@@ -159,8 +160,8 @@ export const meetingsService = {
   },
 
   async submitMom(input: SubmitMomInput) {
-    return prisma.$transaction(async (tx) => {
-      const meeting = await tx.meeting.update({
+    const meeting = await prisma.$transaction(async (tx) => {
+      const m = await tx.meeting.update({
         where: { id: input.meetingId },
         data: {
           momContent: input.momContent,
@@ -168,19 +169,48 @@ export const meetingsService = {
         },
       });
       await tx.account.update({
-        where: { id: meeting.accountId },
+        where: { id: m.accountId },
         data: { lastMomDate: input.sentAt },
       });
       await tx.auditLog.create({
         data: {
           entityType: 'Meeting',
-          entityId: meeting.id,
+          entityId: m.id,
           action: 'MOM_SENT',
           performedBy: input.performedByUserId,
           payload: { momSentAt: input.sentAt.toISOString() },
         },
       });
-      return meeting;
+      return m;
     });
+
+    // Fire the customer email best-effort, OUTSIDE the transaction. Failure
+    // doesn't roll back — the MOM is still recorded. Outcome is audited
+    // separately via NOTIFY_MOM_TO_CUSTOMER.
+    const account = await prisma.account.findUnique({
+      where: { id: meeting.accountId },
+      select: {
+        id: true,
+        clientName: true,
+        companyName: true,
+        customerCode: true,
+        circuitId: true,
+        email: true,
+        samOwnerId: true,
+      },
+    });
+    if (account) {
+      await sendMomToCustomer({
+        meetingId: meeting.id,
+        account,
+        meetingScheduledAt: meeting.scheduledAt,
+        meetingHeldAt: meeting.heldAt,
+        meetingType: meeting.meetingType,
+        momContent: input.momContent,
+        performedByUserId: input.performedByUserId,
+      });
+    }
+
+    return meeting;
   },
 };

@@ -14,6 +14,7 @@ accountsRouter.use(requireAuth);
 accountsRouter.get('/', accountsController.list);
 accountsRouter.post('/import', requireRole('ADMIN', 'SAM_HEAD'), upload.single('file'), importController.upload);
 accountsRouter.get('/:id', accountsController.getById);
+accountsRouter.get('/:id/journey', accountsController.journey);
 accountsRouter.post(
   '/:id/assign',
   requireRole('ADMIN', 'SAM_HEAD'),

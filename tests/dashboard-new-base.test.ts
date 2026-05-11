@@ -35,18 +35,26 @@ describe('GET /dashboard/new-base', () => {
     expect(res.body.avgTimeToFirstMomDays).toBeNull();
   });
 
-  it('counts only NEW-kitty accounts that are not terminated', async () => {
+  it('totals include terminated, current excludes (mirrors existing-base)', async () => {
     const { token } = await adminCookie();
-    // 2 NEW active, 1 NEW terminated, 1 BASE active — only the 2 should count.
+    // 2 NEW active, 1 NEW terminated, 1 BASE active.
+    // Total covers all 3 NEW (including terminated); Current covers the 2 active only.
     await seedAccount({ kittyType: 'NEW', currentArc: 300000, contractStatus: 'ACTIVE', onboardingDate: new Date('2026-04-15') });
     await seedAccount({ kittyType: 'NEW', currentArc: 600000, contractStatus: 'ACTIVE', onboardingDate: new Date('2026-04-20') });
-    await seedAccount({ kittyType: 'NEW', currentArc: 1188000, contractStatus: 'TERMINATED', onboardingDate: new Date('2026-04-10') });
+    await seedAccount({ kittyType: 'NEW', currentArc: 1200000, contractStatus: 'TERMINATED', onboardingDate: new Date('2026-04-10') });
     await seedAccount({ kittyType: 'BASE', currentArc: 960000, contractStatus: 'ACTIVE', onboardingDate: new Date('2025-04-01') });
 
     const res = await authedGet(app, '/dashboard/new-base', token);
     expect(res.status).toBe(200);
-    expect(res.body.totalCustomers).toBe(2);
-    expect(res.body.totalNewArcLakh).toBeCloseTo(9, 0);   // (300000 + 600000) / 100000 = 9L
+    expect(res.body.totalCustomers).toBe(3);
+    expect(res.body.currentCustomers).toBe(2);
+    expect(res.body.terminatedCount).toBe(1);
+    // totalNewArcLakh sums startOfPeriodArc for all 3 NEW (incl. terminated):
+    //   (300000 + 600000 + 1200000) / 100000 = 21L
+    expect(res.body.totalNewArcLakh).toBeCloseTo(21, 0);
+    // currentArcLakh only covers the 2 active:
+    //   (300000 + 600000) / 100000 = 9L
+    expect(res.body.currentArcLakh).toBeCloseTo(9, 0);
   });
 
   it('flags customers with no meeting (§4.6 SAM failure indicator)', async () => {

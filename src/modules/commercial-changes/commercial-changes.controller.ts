@@ -39,12 +39,12 @@ export const commercialChangesController = {
     ).files;
     const approvalFile = files?.approvalFile?.[0];
     const poFile = files?.poFile?.[0];
-    if (!approvalFile) {
-      res.status(422).json({ error: 'Client approval email is mandatory' });
-      return;
-    }
-    if (!poFile) {
-      res.status(422).json({ error: 'Purchase Order (PO) is mandatory' });
+    // At least ONE of approval / PO must be uploaded. Both is still better
+    // (compliance), but a single doc is acceptable to unblock the workflow.
+    if (!approvalFile && !poFile) {
+      res.status(422).json({
+        error: 'Attach at least one document — client approval or PO.',
+      });
       return;
     }
 
@@ -72,14 +72,18 @@ export const commercialChangesController = {
         newBandwidthMbps: parse.data.newBandwidthMbps ?? null,
         effectiveDate: new Date(parse.data.effectiveDate),
         reason: parse.data.reason ?? null,
-        approvalFile: {
-          buffer: approvalFile.buffer,
-          originalName: approvalFile.originalname ?? 'approval',
-        },
-        poFile: {
-          buffer: poFile.buffer,
-          originalName: poFile.originalname ?? 'po',
-        },
+        approvalFile: approvalFile
+          ? {
+              buffer: approvalFile.buffer,
+              originalName: approvalFile.originalname ?? 'approval',
+            }
+          : undefined,
+        poFile: poFile
+          ? {
+              buffer: poFile.buffer,
+              originalName: poFile.originalname ?? 'po',
+            }
+          : undefined,
         performedByUserId: req.user.id,
         disconnectionCategoryId: parse.data.disconnectionCategoryId,
         disconnectionSubCategoryId: parse.data.disconnectionSubCategoryId,
@@ -143,8 +147,22 @@ export const commercialChangesController = {
   },
 
   async disconnectionReasons(_req: AuthedRequest, res: Response) {
-    const reasons = await getCrmClient().fetchDisconnectionReasons();
-    res.json({ reasons });
+    // CRM unreachability shouldn't 500 the form's initial load — it just
+    // means the disconnection dropdown will be empty. Swallow ECONNREFUSED
+    // / 5xx and return [] so the page renders. The frontend already treats
+    // an empty list as "bridge down".
+    try {
+      const reasons = await getCrmClient().fetchDisconnectionReasons();
+      res.json({ reasons });
+    } catch (err) {
+      // Log once at warn level (not the noisy errorHandler stack trace).
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[disconnectionReasons] CRM unreachable — returning empty list:',
+        err instanceof Error ? err.message : err,
+      );
+      res.json({ reasons: [] });
+    }
   },
 
   async list(req: AuthedRequest, res: Response) {

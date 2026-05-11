@@ -64,7 +64,7 @@ describe('POST /commercial-changes', () => {
     expect(res.status).toBe(401);
   });
 
-  it('422 when no file is attached (HARD GATE)', async () => {
+  it('422 when neither file is attached (at least one required)', async () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({ clientName: 'Acme', currentArc: 600000 });
     const res = await request(app)
@@ -75,7 +75,7 @@ describe('POST /commercial-changes', () => {
       .field('newArc', '720000')
       .field('effectiveDate', '2026-05-01');
     expect(res.status).toBe(422);
-    expect(res.body.error).toMatch(/mandatory/i);
+    expect(res.body.error).toMatch(/at least one document/i);
   });
 
   it('400 on invalid body', async () => {
@@ -118,7 +118,7 @@ describe('POST /commercial-changes', () => {
     expect(res.status).toBe(422);
   });
 
-  it('422 when poFile is missing (PO is mandatory)', async () => {
+  it('accepts approval-only (PO not attached)', async () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({ clientName: 'Acme', currentArc: 600000 });
     const res = await request(app)
@@ -129,11 +129,14 @@ describe('POST /commercial-changes', () => {
       .field('newArc', '720000')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'approval.pdf');
-    expect(res.status).toBe(422);
-    expect(res.body.error).toMatch(/Purchase Order/i);
+    expect(res.status).toBe(201);
+    expect(res.body.commercialChange.approvalFileUrl).toMatch(/^https:\/\//);
+    expect(res.body.commercialChange.poFileUrl).toBeNull();
+    expect(fakeUploader.uploads).toHaveLength(1);
+    expect(fakeUploader.uploads[0]?.kind).toBe('approval');
   });
 
-  it('422 when approvalFile is missing (approval is mandatory)', async () => {
+  it('accepts po-only (approval not attached)', async () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({ clientName: 'Acme', currentArc: 600000 });
     const res = await request(app)
@@ -144,8 +147,11 @@ describe('POST /commercial-changes', () => {
       .field('newArc', '720000')
       .field('effectiveDate', '2026-05-01')
       .attach('poFile', PDF_BUFFER, 'po.pdf');
-    expect(res.status).toBe(422);
-    expect(res.body.error).toMatch(/approval/i);
+    expect(res.status).toBe(201);
+    expect(res.body.commercialChange.approvalFileUrl).toBeNull();
+    expect(res.body.commercialChange.poFileUrl).toMatch(/^https:\/\//);
+    expect(fakeUploader.uploads).toHaveLength(1);
+    expect(fakeUploader.uploads[0]?.kind).toBe('po');
   });
 
   it('UPGRADE: persists change + audit log; account NOT updated until CRM COMPLETED', async () => {

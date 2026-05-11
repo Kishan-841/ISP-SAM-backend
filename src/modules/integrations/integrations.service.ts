@@ -113,6 +113,10 @@ export const integrationsService = {
         kittyType: 'NEW',
         contractStatus: 'ACTIVE',
         currentArc: new Prisma.Decimal(currentArc),
+        // Snapshot the activation-time ARC so dashboards can show the
+        // "since onboarding" delta. Set ONCE on create — never overwritten
+        // on subsequent webhook replays.
+        startOfPeriodArc: new Prisma.Decimal(currentArc),
         onboardingDate: new Date(c.onboardingDate),
         externalCrmId: c.externalId,
         email: c.email ?? null,
@@ -125,6 +129,8 @@ export const integrationsService = {
         companyName: c.companyName,
         clientName: c.contactName?.trim() || c.companyName,
         currentArc: new Prisma.Decimal(currentArc),
+        // NB: startOfPeriodArc intentionally absent — never overwrite the
+        // original snapshot. Backfill happens via the SQL fixup migration.
         email: c.email ?? null,
         mobileNumber: c.phone ?? null,
         currentPlan: c.currentPlan ?? null,

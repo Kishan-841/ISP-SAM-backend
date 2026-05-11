@@ -42,6 +42,19 @@ export const accountsController = {
     res.json({ account });
   },
 
+  async journey(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const data = await accountsService.journey(req.params.id as string, req.user);
+    if (!data) {
+      res.status(404).json({ error: 'Account not found' });
+      return;
+    }
+    res.json(data);
+  },
+
   /**
    * POST /accounts/:id/assign
    * Body: { samUserId: string | null }

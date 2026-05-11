@@ -24,8 +24,12 @@ export type CommitInput = {
   newBandwidthMbps: number | null;
   effectiveDate: Date;
   reason: string | null;
-  approvalFile: { buffer: Buffer; originalName: string };
-  poFile: { buffer: Buffer; originalName: string };
+  /**
+   * Approval and PO are EACH optional, but at least one must be provided.
+   * Controller enforces the at-least-one rule before calling commit().
+   */
+  approvalFile?: { buffer: Buffer; originalName: string };
+  poFile?: { buffer: Buffer; originalName: string };
   performedByUserId: string;
   // Disconnection-only.
   disconnectionCategoryId?: string;
@@ -43,9 +47,9 @@ export type CommitResult = {
     oldArc: number;
     newArc: number;
     effectiveDate: string;
-    approvalFileUrl: string;
+    approvalFileUrl: string | null;
     approvalFilePublicId: string | null;
-    poFileUrl: string;
+    poFileUrl: string | null;
     poFilePublicId: string | null;
     crmServiceOrderId: string | null;
     crmOrderNumber: string | null;
@@ -81,22 +85,32 @@ export const commercialChangesService = {
     // from a failed transaction are cheap; orphan DB rows confuse audit.)
     const commercialChangeId = crypto.randomUUID();
 
-    // 1. Upload BOTH attachments to Cloudinary in parallel.
+    if (!input.approvalFile && !input.poFile) {
+      // Defensive — controller already gates this, but a service-level
+      // guard keeps the rule honest if commit() is called from elsewhere.
+      throw new Error('At least one of approvalFile or poFile is required');
+    }
+
+    // 1. Upload whichever attachments are present, in parallel.
     //    Folder layout: sam-software/po-and-mail-acceptance/<id>/<kind>/<filename>
     const uploader = getApprovalFileUploader();
     const [approvalUpload, poUpload] = await Promise.all([
-      uploader.uploadApprovalFile({
-        buffer: input.approvalFile.buffer,
-        originalName: input.approvalFile.originalName,
-        commercialChangeId,
-        kind: 'approval',
-      }),
-      uploader.uploadApprovalFile({
-        buffer: input.poFile.buffer,
-        originalName: input.poFile.originalName,
-        commercialChangeId,
-        kind: 'po',
-      }),
+      input.approvalFile
+        ? uploader.uploadApprovalFile({
+            buffer: input.approvalFile.buffer,
+            originalName: input.approvalFile.originalName,
+            commercialChangeId,
+            kind: 'approval',
+          })
+        : Promise.resolve(null),
+      input.poFile
+        ? uploader.uploadApprovalFile({
+            buffer: input.poFile.buffer,
+            originalName: input.poFile.originalName,
+            commercialChangeId,
+            kind: 'po',
+          })
+        : Promise.resolve(null),
     ]);
 
     const oldArc = Number(account.currentArc);
@@ -116,11 +130,14 @@ export const commercialChangesService = {
           oldArc,
           newArc: input.newArc,
           effectiveDate: input.effectiveDate,
-          clientApprovalAttached: true,
-          approvalFileUrl: approvalUpload.secureUrl,
-          approvalFilePublicId: approvalUpload.publicId,
-          poFileUrl: poUpload.secureUrl,
-          poFilePublicId: poUpload.publicId,
+          // True iff at least the approval file was attached. PO-only
+          // submissions still set this false so the compliance signal
+          // ("client approval attached") stays honest.
+          clientApprovalAttached: !!approvalUpload,
+          approvalFileUrl: approvalUpload?.secureUrl ?? null,
+          approvalFilePublicId: approvalUpload?.publicId ?? null,
+          poFileUrl: poUpload?.secureUrl ?? null,
+          poFilePublicId: poUpload?.publicId ?? null,
           createdBy: input.performedByUserId,
           reason: input.reason,
           oldBandwidthMbps: oldBandwidth,
@@ -143,10 +160,10 @@ export const commercialChangesService = {
             oldArc,
             newArc: input.newArc,
             effectiveDate: input.effectiveDate.toISOString(),
-            approvalFileUrl: approvalUpload.secureUrl,
-            approvalFilePublicId: approvalUpload.publicId,
-            poFileUrl: poUpload.secureUrl,
-            poFilePublicId: poUpload.publicId,
+            approvalFileUrl: approvalUpload?.secureUrl ?? null,
+            approvalFilePublicId: approvalUpload?.publicId ?? null,
+            poFileUrl: poUpload?.secureUrl ?? null,
+            poFilePublicId: poUpload?.publicId ?? null,
           },
         },
       });
@@ -173,8 +190,8 @@ export const commercialChangesService = {
           input,
           account.externalCrmId,
           result.id,
-          approvalUpload.secureUrl,
-          poUpload.secureUrl,
+          approvalUpload?.secureUrl ?? null,
+          poUpload?.secureUrl ?? null,
         );
         const order = await getCrmClient().createServiceOrder(crmInput);
         crmServiceOrderId = order.id;
@@ -237,10 +254,10 @@ export const commercialChangesService = {
         oldArc: Number(result.oldArc),
         newArc: Number(result.newArc),
         effectiveDate: result.effectiveDate.toISOString(),
-        approvalFileUrl: approvalUpload.secureUrl,
-        approvalFilePublicId: approvalUpload.publicId,
-        poFileUrl: poUpload.secureUrl,
-        poFilePublicId: poUpload.publicId,
+        approvalFileUrl: approvalUpload?.secureUrl ?? null,
+        approvalFilePublicId: approvalUpload?.publicId ?? null,
+        poFileUrl: poUpload?.secureUrl ?? null,
+        poFilePublicId: poUpload?.publicId ?? null,
         crmServiceOrderId,
         crmOrderNumber,
         crmStatus,
@@ -430,18 +447,18 @@ function buildServiceOrderInput(
   input: CommitInput,
   externalCrmId: string,
   samChangeId: string,
-  approvalFileUrl: string,
-  poFileUrl: string,
+  approvalFileUrl: string | null,
+  poFileUrl: string | null,
 ): CreateServiceOrderInput {
   const orderType: ServiceOrderType = input.changeType; // names already aligned post-rename
   const base: CreateServiceOrderInput = {
     customerId: externalCrmId,
     orderType,
-    // Cloudinary HTTPS URLs to the supporting documents — both rendered as
-    // links on the CRM Docs review UI.
-    approvalFileUrl,
-    poFileUrl,
   };
+  // Cloudinary HTTPS URLs to the supporting documents — only included when
+  // actually present, so the CRM doesn't get bogus empty-string URLs.
+  if (approvalFileUrl) base.approvalFileUrl = approvalFileUrl;
+  if (poFileUrl) base.poFileUrl = poFileUrl;
   // Always prefix CRM notes with our internal SAM-XXXXXXXX reference so
   // support tickets that span the boundary are trivially traceable. The
   // CRM team explicitly asked for this in their contract notes.

@@ -22,7 +22,7 @@ export type SamRow = {
   approvalPercent: number;     // % commercial changes with approval attached
   activationPending: number;   // CRM orders waiting on this SAM (PENDING_SAM_ACTIVATION)
   customersWithoutMeeting: number;
-  /** Reliability composite from leaderboard formula (0–100). */
+  /** Reliability composite (revenue / MOM / compliance / onboarding) — 0–100. */
   reliabilityScore: number;
 };
 
@@ -37,6 +37,8 @@ export type TeamPerformance = {
     arcDelta: number;
     totalChanges: number;
     momsPending: number;
+    momsSent: number;
+    meetingsHeld: number;
     activationPending: number;
     customersWithoutMeeting30d: number;
   };
@@ -85,6 +87,8 @@ export async function computeTeamPerformance({
         arcDelta: 0,
         totalChanges: 0,
         momsPending: 0,
+        momsSent: 0,
+        meetingsHeld: 0,
         activationPending: 0,
         customersWithoutMeeting30d: 0,
       },
@@ -230,7 +234,7 @@ export async function computeTeamPerformance({
       (a) => !accountsWithMeeting.has(a.id),
     ).length;
 
-    // Reliability composite (mirrors leaderboard.service formula).
+    // Reliability composite — see computeReliabilityScore() below.
     const reliabilityScore = computeReliabilityScore({
       revenueDeltaPercent: arcDeltaPercent,
       upgrades: changeBuckets.UPGRADE.count,
@@ -272,6 +276,8 @@ export async function computeTeamPerformance({
   const teamStartArc = samRows.reduce((s, r) => s + r.startOfPeriodArc, 0);
   const teamTotalChanges = samRows.reduce((s, r) => s + r.totalChanges, 0);
   const teamActivationPending = samRows.reduce((s, r) => s + r.activationPending, 0);
+  const teamMeetingsHeld = samRows.reduce((s, r) => s + r.meetingsHeld, 0);
+  const teamMomsSent = samRows.reduce((s, r) => s + r.momsSent, 0);
 
   // MOMs pending = held meetings without momSentAt
   const momsPending = meetings.filter(
@@ -304,6 +310,8 @@ export async function computeTeamPerformance({
       arcDelta: round0(teamTotalArc - teamStartArc),
       totalChanges: teamTotalChanges,
       momsPending,
+      momsSent: teamMomsSent,
+      meetingsHeld: teamMeetingsHeld,
       activationPending: teamActivationPending,
       customersWithoutMeeting30d,
     },
@@ -341,10 +349,9 @@ function bucketsToRoundedNumbers(
 }
 
 /**
- * Mirrors leaderboard.service composite (revenue 40 / mom 20 / compliance 25 /
- * onboarding 15) but scoped to the inputs available at this layer. Onboarding
- * here is a flat 100 (not penalised) when the SAM has no NEW-kitty customers,
- * matching the leaderboard convention.
+ * Composite weighted score: revenue 40 / mom 20 / compliance 25 / onboarding
+ * 15. Onboarding is a flat 100 (not penalised) when the SAM has no NEW-kitty
+ * customers — they have nothing to onboard, so we don't dock them.
  */
 function computeReliabilityScore(input: {
   revenueDeltaPercent: number;

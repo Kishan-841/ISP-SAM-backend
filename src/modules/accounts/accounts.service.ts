@@ -1,6 +1,18 @@
-import type { KittyType, UserRole, Prisma } from '@prisma/client';
+import type {
+  KittyType,
+  UserRole,
+  Prisma,
+  CommercialChangeType,
+} from '@prisma/client';
 import { prisma } from '../../prisma.js';
 import { sendCustomerAssignedAlert } from '../../services/email/notifications.service.js';
+
+const TYPE_LABEL: Record<CommercialChangeType, string> = {
+  UPGRADE: 'Upgrade',
+  DOWNGRADE: 'Downgrade',
+  RATE_REVISION: 'Rate Revision',
+  DISCONNECTION: 'Disconnection',
+};
 
 export type Requester = { id: string; role: UserRole };
 
@@ -78,6 +90,179 @@ export const accountsService = {
       return null; // Pretend it doesn't exist — don't leak existence to non-owners.
     }
     return account;
+  },
+
+  /**
+   * Customer journey — account header + chronological timeline of every
+   * meaningful event in the customer's lifecycle. Used by the per-customer
+   * detail page to give SAM_HEAD/ADMIN a one-screen story:
+   *   onboarded → assigned → commercial changes → meetings → today.
+   */
+  async journey(id: string, requester: Requester) {
+    const account = await this.getById(id, requester);
+    if (!account) return null;
+
+    const [changes, audits, meetings] = await Promise.all([
+      prisma.commercialChange.findMany({
+        where: { accountId: id },
+        orderBy: [{ effectiveDate: 'asc' }, { createdAt: 'asc' }],
+        select: {
+          id: true,
+          changeType: true,
+          oldArc: true,
+          newArc: true,
+          oldBandwidthMbps: true,
+          newBandwidthMbps: true,
+          effectiveDate: true,
+          createdAt: true,
+          reason: true,
+          crmStatus: true,
+          crmOrderNumber: true,
+          accountAppliedAt: true,
+          createdBy: true,
+        },
+      }),
+      prisma.auditLog.findMany({
+        where: {
+          entityType: 'Account',
+          entityId: id,
+          action: { in: ['ASSIGN', 'UNASSIGN'] },
+        },
+        orderBy: { timestamp: 'asc' },
+        select: {
+          id: true,
+          action: true,
+          timestamp: true,
+          performedBy: true,
+          payload: true,
+        },
+      }),
+      prisma.meeting.findMany({
+        where: { accountId: id, heldAt: { not: null } },
+        orderBy: { heldAt: 'asc' },
+        select: {
+          id: true,
+          heldAt: true,
+          momSentAt: true,
+          createdBy: true,
+        },
+      }),
+    ]);
+
+    // Hydrate user names referenced by changes / audits / meetings.
+    const userIds = new Set<string>();
+    for (const c of changes) userIds.add(c.createdBy);
+    for (const a of audits) userIds.add(a.performedBy);
+    for (const m of meetings) userIds.add(m.createdBy);
+    // Pull owner-id targets out of audit payloads.
+    for (const a of audits) {
+      const p = a.payload as { from?: string | null; to?: string | null } | null;
+      if (p?.from) userIds.add(p.from);
+      if (p?.to) userIds.add(p.to);
+    }
+    const users = userIds.size
+      ? await prisma.user.findMany({
+          where: { id: { in: Array.from(userIds) } },
+          select: { id: true, name: true, email: true },
+        })
+      : [];
+    const userById = new Map(users.map((u) => [u.id, u]));
+    const nameOf = (id: string | null | undefined): string | null =>
+      id ? userById.get(id)?.name ?? null : null;
+
+    type JourneyEvent = {
+      id: string;
+      kind:
+        | 'ONBOARDED'
+        | 'ASSIGNED'
+        | 'UNASSIGNED'
+        | 'COMMERCIAL_CHANGE'
+        | 'MEETING';
+      timestamp: string;
+      title: string;
+      // Commercial-change details
+      changeType?: 'UPGRADE' | 'DOWNGRADE' | 'RATE_REVISION' | 'DISCONNECTION';
+      oldArc?: number;
+      newArc?: number;
+      oldBandwidthMbps?: number | null;
+      newBandwidthMbps?: number | null;
+      reason?: string | null;
+      crmStatus?: string | null;
+      crmOrderNumber?: string | null;
+      accountAppliedAt?: string | null;
+      // Assignment details
+      fromOwnerName?: string | null;
+      toOwnerName?: string | null;
+      // Meeting details
+      momSent?: boolean;
+      // Actor (who performed it)
+      performerName?: string | null;
+    };
+
+    const events: JourneyEvent[] = [];
+
+    // 1. Onboarding — always the first event.
+    events.push({
+      id: `onboarded-${account.id}`,
+      kind: 'ONBOARDED',
+      timestamp: account.onboardingDate.toISOString(),
+      title: account.kittyType === 'BASE' ? 'In Existing Base on April 1' : 'Onboarded from CRM',
+    });
+
+    // 2. Assignments (ASSIGN / UNASSIGN audit rows).
+    for (const a of audits) {
+      const payload = (a.payload ?? {}) as { from?: string | null; to?: string | null };
+      events.push({
+        id: a.id,
+        kind: a.action === 'ASSIGN' ? 'ASSIGNED' : 'UNASSIGNED',
+        timestamp: a.timestamp.toISOString(),
+        title:
+          a.action === 'ASSIGN'
+            ? `Assigned to ${nameOf(payload.to) ?? 'a SAM'}`
+            : `Unassigned${nameOf(payload.from) ? ` from ${nameOf(payload.from)}` : ''}`,
+        fromOwnerName: nameOf(payload.from),
+        toOwnerName: nameOf(payload.to),
+        performerName: nameOf(a.performedBy),
+      });
+    }
+
+    // 3. Commercial changes.
+    for (const c of changes) {
+      events.push({
+        id: c.id,
+        kind: 'COMMERCIAL_CHANGE',
+        timestamp: c.effectiveDate.toISOString(),
+        title: TYPE_LABEL[c.changeType],
+        changeType: c.changeType,
+        oldArc: Number(c.oldArc),
+        newArc: Number(c.newArc),
+        oldBandwidthMbps: c.oldBandwidthMbps,
+        newBandwidthMbps: c.newBandwidthMbps,
+        reason: c.reason,
+        crmStatus: c.crmStatus,
+        crmOrderNumber: c.crmOrderNumber,
+        accountAppliedAt: c.accountAppliedAt ? c.accountAppliedAt.toISOString() : null,
+        performerName: nameOf(c.createdBy),
+      });
+    }
+
+    // 4. Meetings.
+    for (const m of meetings) {
+      if (!m.heldAt) continue;
+      events.push({
+        id: m.id,
+        kind: 'MEETING',
+        timestamp: m.heldAt.toISOString(),
+        title: m.momSentAt ? 'Meeting held · MOM sent' : 'Meeting held · MOM pending',
+        momSent: !!m.momSentAt,
+        performerName: nameOf(m.createdBy),
+      });
+    }
+
+    // Order chronologically — oldest first reads as a story.
+    events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+    return { account, events };
   },
 
   /**

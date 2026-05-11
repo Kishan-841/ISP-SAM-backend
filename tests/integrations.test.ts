@@ -138,6 +138,21 @@ describe('POST /integrations/crm/customer-activated', () => {
       expect(accounts).toHaveLength(1);
       expect(Number(accounts[0]!.currentArc)).toBe(540000);
       expect(accounts[0]!.companyName).toBe('HealthPlus Hospitals Pvt Ltd');
+      // startOfPeriodArc is captured ONCE on the first activation and never
+      // overwritten — even when a subsequent webhook arrives with a different
+      // currentArc. This is what lets dashboards show the "since onboarding"
+      // delta correctly.
+      expect(Number(accounts[0]!.startOfPeriodArc)).toBe(360000);
+    });
+
+    it('captures startOfPeriodArc on first activation', async () => {
+      const payload = samplePayload();
+      await postWebhook(payload);
+      const account = await prisma.account.findUnique({
+        where: { externalCrmId: payload.customer.externalId },
+      });
+      expect(Number(account?.startOfPeriodArc)).toBe(600000);
+      expect(Number(account?.currentArc)).toBe(600000);
     });
   });
 

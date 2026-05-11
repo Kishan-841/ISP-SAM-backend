@@ -7,7 +7,6 @@ import { authRouter } from './modules/auth/auth.routes.js';
 import { commercialChangesRouter } from './modules/commercial-changes/commercial-changes.routes.js';
 import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
 import { integrationsRouter } from './modules/integrations/integrations.routes.js';
-import { leaderboardRouter } from './modules/leaderboard/leaderboard.routes.js';
 import { meetingsRouter } from './modules/meetings/meetings.routes.js';
 import { notificationsRouter } from './modules/notifications/notifications.routes.js';
 import { usersRouter } from './modules/users/users.routes.js';
@@ -35,7 +34,6 @@ app.use('/users', usersRouter);
 app.use('/accounts', accountsRouter);
 app.use('/audit-logs', auditRouter);
 app.use('/commercial-changes', commercialChangesRouter);
-app.use('/leaderboard', leaderboardRouter);
 app.use('/meetings', meetingsRouter);
 app.use('/notifications', notificationsRouter);
 // Public endpoint — auth is enforced inside the router via HMAC, not JWT.

@@ -36,9 +36,19 @@ export function fyQuarterRange(
 }
 
 export type NewBaseMetrics = {
-  // Headline
+  // Components — mirrors ExistingBaseMetrics shape so the dashboards are
+  // structurally identical. "Total" includes terminated; "Current" excludes.
   totalCustomers: number;
   totalNewArcLakh: number;
+  currentCustomers: number;
+  currentArcLakh: number;
+  terminatedCount: number;
+
+  // Commercial-change breakdown across NEW-kitty accounts (not time-windowed).
+  upgrades:      { count: number; arcAddedLakh: number };
+  downgrades:    { count: number; arcReducedLakh: number };
+  rateRevisions: { count: number; arcChangeLakh: number };
+  terminations:  { count: number; arcLostLakh: number };
 
   // Velocity (by onboardingDate)
   addedThisMonth:   { count: number; arcLakh: number };
@@ -268,6 +278,7 @@ export async function computeNewBase(
       companyName: true,
       customerCode: true,
       currentArc: true,
+      startOfPeriodArc: true,
       contractStatus: true,
       onboardingDate: true,
     },
@@ -276,9 +287,18 @@ export async function computeNewBase(
 
   const active = newAccounts.filter((a) => a.contractStatus !== 'TERMINATED');
 
-  // Headline
-  const totalCustomers = active.length;
-  const totalNewArc = active.reduce((s, a) => s + Number(a.currentArc), 0);
+  // Components — mirrors existing-base. "Total" = all accounts ever onboarded
+  // (includes terminated). "Current" = active right now.
+  const totalCustomers = newAccounts.length;
+  const currentCustomers = active.length;
+  const terminatedCount = newAccounts.length - active.length;
+  // Total ARC anchors on each account's onboarding-time ARC (`startOfPeriodArc`)
+  // so post-onboarding commercial changes don't pollute the headline.
+  const totalNewArc = newAccounts.reduce(
+    (s, a) => s + Number(a.startOfPeriodArc ?? a.currentArc),
+    0,
+  );
+  const currentArc = active.reduce((s, a) => s + Number(a.currentArc), 0);
 
   // Velocity windows
   const monthStart   = startOfMonthUTC(now);
@@ -362,14 +382,49 @@ export async function computeNewBase(
   let immediateRateRevisions = 0;
   let earlyDowngrades = 0;
 
+  // All-time commercial-change buckets across NEW kitty (mirrors existing-base
+  // shape, no onboarding-window filter).
+  let upgradesCount = 0;
+  let upgradesArcAdded = 0;
+  let downgradesCount = 0;
+  let downgradesArcReduced = 0;
+  let rateRevsCount = 0;
+  let rateRevsArcChange = 0;
+  let terminationsCount = 0;
+  let terminationsArcLost = 0;
+
   for (const c of changes) {
+    const oldA = Number(c.oldArc);
+    const newA = Number(c.newArc);
+
+    // All-time aggregates.
+    switch (c.changeType) {
+      case 'UPGRADE':
+        upgradesCount++;
+        upgradesArcAdded += newA - oldA;
+        break;
+      case 'DOWNGRADE':
+        downgradesCount++;
+        downgradesArcReduced += oldA - newA;
+        break;
+      case 'RATE_REVISION':
+        rateRevsCount++;
+        rateRevsArcChange += oldA - newA;
+        break;
+      case 'DISCONNECTION':
+        terminationsCount++;
+        terminationsArcLost += oldA;
+        break;
+    }
+
+    // Onboarding-window flags (still useful for the "early" / risk callouts).
     const onboarded = onboardingByAccount.get(c.accountId);
     if (!onboarded) continue;
     const days = daysBetween(c.effectiveDate, onboarded);
     if (days < 0) continue;
     if (c.changeType === 'UPGRADE' && days <= EARLY_GROWTH_DAYS) {
       earlyUpgradesCount++;
-      earlyUpgradesArcAdded += Number(c.newArc) - Number(c.oldArc);
+      earlyUpgradesArcAdded += newA - oldA;
     }
     if (c.changeType === 'RATE_REVISION' && days <= EARLY_HANDOVER_DAYS) {
       immediateRateRevisions++;
@@ -393,6 +448,25 @@ export async function computeNewBase(
   return {
     totalCustomers,
     totalNewArcLakh: round1(totalNewArc / LAKH),
+    currentCustomers,
+    currentArcLakh: round1(currentArc / LAKH),
+    terminatedCount,
+    upgrades: {
+      count: upgradesCount,
+      arcAddedLakh: round1(upgradesArcAdded / LAKH),
+    },
+    downgrades: {
+      count: downgradesCount,
+      arcReducedLakh: round1(downgradesArcReduced / LAKH),
+    },
+    rateRevisions: {
+      count: rateRevsCount,
+      arcChangeLakh: round1(rateRevsArcChange / LAKH),
+    },
+    terminations: {
+      count: terminationsCount,
+      arcLostLakh: round1(terminationsArcLost / LAKH),
+    },
     addedThisMonth,
     addedThisQuarter,
     addedThisFy,

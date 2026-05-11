@@ -1,3 +1,5 @@
+import { NetcoreEmailClient } from './netcore-email-client.js';
+
 /**
  * Email transport abstraction.
  *
@@ -73,8 +75,22 @@ let testOverride: EmailClient | null = null;
 
 export function getEmailClient(): EmailClient {
   if (testOverride) return testOverride;
-  if (!cachedClient) cachedClient = new LoggingEmailClient();
+  if (!cachedClient) cachedClient = buildClientFromEnv();
   return cachedClient;
+}
+
+function buildClientFromEnv(): EmailClient {
+  const apiKey = process.env.NETCORE_API_KEY;
+  const fromEmail = process.env.NETCORE_FROM_EMAIL;
+  if (apiKey && fromEmail) {
+    return new NetcoreEmailClient({
+      apiKey,
+      fromEmail,
+      fromName: process.env.NETCORE_FROM_NAME ?? 'Gazon SAM',
+      replyTo: process.env.NETCORE_REPLY_TO,
+    });
+  }
+  return new LoggingEmailClient();
 }
 
 /** Used by tests to swap in a fake. */

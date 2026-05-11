@@ -93,13 +93,24 @@ export async function getNotifications({
     orClauses.push({ action: 'NOTIFY_CUSTOMER_ACTIVATED' });
   }
 
+  // SAM with no scoped entities — short-circuit. Avoids hitting Postgres
+  // with a sentinel value on the @db.Uuid `id` column (which would throw
+  // P2023: invalid UUID).
+  if (requester.role !== 'ADMIN' && orClauses.length === 0) {
+    return {
+      notifications: [],
+      total: 0,
+      unread: 0,
+      page: safePage,
+      pageSize: safePageSize,
+    };
+  }
+
   // ADMIN sees everything regardless of scope.
   const where =
     requester.role === 'ADMIN'
       ? { action: { in: RELEVANT_ACTIONS } }
-      : orClauses.length === 0
-        ? { id: '__never__' } // no scope → empty feed
-        : { AND: [{ action: { in: RELEVANT_ACTIONS } }, { OR: orClauses }] };
+      : { AND: [{ action: { in: RELEVANT_ACTIONS } }, { OR: orClauses }] };
 
   // Pull dismissed audit-log ids for this user — we exclude them from the feed.
   const dismissed = await prisma.notificationState.findMany({
@@ -273,12 +284,16 @@ export async function markAllAsRead({
   if (requester.role === 'SAM_HEAD' || requester.role === 'ADMIN') {
     orClauses.push({ action: 'NOTIFY_CUSTOMER_ACTIVATED' });
   }
+  // SAM with no scoped entities — nothing to mark. See note in
+  // getNotifications for the UUID-sentinel rationale.
+  if (requester.role !== 'ADMIN' && orClauses.length === 0) {
+    return { markedCount: 0 };
+  }
+
   const where: Prisma.AuditLogWhereInput =
     requester.role === 'ADMIN'
       ? { action: { in: RELEVANT_ACTIONS } }
-      : orClauses.length === 0
-        ? { id: '__never__' }
-        : { AND: [{ action: { in: RELEVANT_ACTIONS } }, { OR: orClauses }] };
+      : { AND: [{ action: { in: RELEVANT_ACTIONS } }, { OR: orClauses }] };
 
   const targets = await prisma.auditLog.findMany({
     where,

@@ -17,6 +17,18 @@ enum ContractStatus {
   EXPIRED
   TERMINATED
   PENDING
+  /// SAM has raised a disconnection. 21-day retention window in progress —
+  /// customer is *not yet* terminated; on day 21 SAM is prompted to either
+  /// RETAIN or PROCEED with the disconnection.
+  PROBABLE_CHURN
+  /// SAM picked PROCEED on the day-21 retention prompt. 10-day window for
+  /// paperwork; account is terminated on `scheduledTerminationAt`.
+  DISCONNECTING
+}
+
+enum RetentionDecision {
+  RETAIN
+  PROCEED
 }
 
 enum CommercialChangeType {
@@ -116,6 +128,21 @@ model CommercialChange {
   disconnectionCategoryId    String?   @map("disconnection_category_id")
   disconnectionSubCategoryId String?   @map("disconnection_sub_category_id")
   disconnectionReason        String?   @map("disconnection_reason")
+
+  // ── Probable-churn retention workflow (DISCONNECTION rows only) ───────
+  // Day 0 (commit)  → retentionPromptDueAt = effectiveDate + 21d
+  // Day 21          → SAM picks RETAIN or PROCEED (retentionDecision +
+  //                   retentionDecidedAt stamped)
+  // PROCEED only    → scheduledTerminationAt = retentionDecidedAt + 10d
+  // scheduledTerminationAt → lazy sweep terminates the account
+  /// When the SAM should be prompted for retain/proceed. NULL on non-disconnection rows.
+  retentionPromptDueAt    DateTime?         @map("retention_prompt_due_at") @db.Date
+  /// SAM's day-21 answer. NULL until decided.
+  retentionDecision       RetentionDecision? @map("retention_decision")
+  /// When the decision was made.
+  retentionDecidedAt      DateTime?         @map("retention_decided_at") @db.Timestamptz(6)
+  /// Date the account is to be fully terminated (PROCEED only).
+  scheduledTerminationAt  DateTime?         @map("scheduled_termination_at") @db.Date
 
   createdAt              DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
 

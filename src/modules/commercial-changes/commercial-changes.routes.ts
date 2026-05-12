@@ -47,3 +47,7 @@ commercialChangesRouter.post(
   '/:id/set-activation-date',
   commercialChangesController.setActivationDate,
 );
+commercialChangesRouter.post(
+  '/:id/retention-decision',
+  commercialChangesController.retentionDecision,
+);

@@ -67,6 +67,45 @@ export function renderRow(label: string, value: string, alt = false): string {
     </tr>`;
 }
 
+/**
+ * Convert lightly-formatted plain text into HTML:
+ *  - blank lines split paragraphs
+ *  - consecutive lines starting with "- " become a <ul>
+ *  - "**word**" → <strong>word</strong>
+ *  - lone newlines inside a paragraph become <br>
+ *
+ * Mirrored on the frontend by formatPlainTextToReact (kept in sync —
+ * any rule added here must be added there too).
+ */
+export function plainBodyToHtml(raw: string): string {
+  const escaped = escapeHtml(raw.trim());
+  const blocks = escaped.split(/\n\s*\n/);
+  return blocks
+    .map((block) => {
+      const lines = block.split('\n');
+      const allBullets =
+        lines.length > 0 && lines.every((l) => /^\s*-\s+/.test(l));
+      if (allBullets) {
+        const items = lines
+          .map((l) => l.replace(/^\s*-\s+/, ''))
+          .map(
+            (li) =>
+              `<li style="margin:4px 0;font-size:14px;line-height:1.6;color:#111827;">${applyBold(li)}</li>`,
+          )
+          .join('');
+        return `<ul style="margin:0 0 12px;padding-left:20px;">${items}</ul>`;
+      }
+      const html = applyBold(block).replace(/\n/g, '<br>');
+      return `<p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:#111827;">${html}</p>`;
+    })
+    .join('');
+}
+
+function applyBold(s: string): string {
+  // The input is already HTML-escaped, so `**word**` is literally `**word**`.
+  return s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+}
+
 /** Render a CTA strip near the bottom of the email. */
 export function renderCallout(opts: {
   title: string;

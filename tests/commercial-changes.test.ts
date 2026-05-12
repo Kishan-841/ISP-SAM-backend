@@ -156,7 +156,15 @@ describe('POST /commercial-changes', () => {
 
   it('UPGRADE: persists change + audit log; account NOT updated until CRM COMPLETED', async () => {
     const { cookie, user } = await adminCookie();
-    const acct = await seedAccount({ clientName: 'Acme', currentArc: 600000, bandwidthMbps: 100 });
+    // externalCrmId set → CRM-synced flow: account state must wait for
+    // CRM to reach COMPLETED before mirroring. Excel-imported accounts
+    // (without externalCrmId) skip CRM entirely — covered separately below.
+    const acct = await seedAccount({
+      clientName: 'Acme',
+      currentArc: 600000,
+      bandwidthMbps: 100,
+      externalCrmId: 'crm-acme-pending',
+    });
 
     const res = await request(app)
       .post('/commercial-changes')
@@ -202,9 +210,16 @@ describe('POST /commercial-changes', () => {
     expect(audits[0]?.performedBy).toBe(user.id);
   });
 
-  it('DISCONNECTION: persists change; account NOT terminated until CRM COMPLETED', async () => {
+  it('DISCONNECTION: enters PROBABLE_CHURN, NOT terminated, 21-day retention prompt scheduled', async () => {
+    // Disconnection commit no longer terminates — the account enters the
+    // 21-day probable-churn window. SAM is prompted on day 21 to either
+    // RETAIN or PROCEED. CRM service-order is NOT raised until PROCEED.
     const { cookie } = await adminCookie();
-    const acct = await seedAccount({ clientName: 'GoneCo', currentArc: 900000 });
+    const acct = await seedAccount({
+      clientName: 'GoneCo',
+      currentArc: 900000,
+      externalCrmId: 'crm-goneco-pending',
+    });
 
     const res = await request(app)
       .post('/commercial-changes')
@@ -219,15 +234,31 @@ describe('POST /commercial-changes', () => {
       .attach('approvalFile', PDF_BUFFER, 'termination.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
 
     expect(res.status).toBe(201);
+    expect(res.body.crm).toEqual({ ok: 'probable-churn' });
+
     const after = await prisma.account.findUnique({ where: { id: acct.id } });
-    // Pre-CRM-COMPLETED: account stays ACTIVE with original ARC.
-    expect(after?.contractStatus).toBe('ACTIVE');
+    expect(after?.contractStatus).toBe('PROBABLE_CHURN');
+    // ARC unchanged — customer is still paying through the 21-day window.
     expect(Number(after?.currentArc)).toBe(900000);
+
+    const change = await prisma.commercialChange.findUnique({
+      where: { id: res.body.commercialChange.id },
+    });
+    // retentionPromptDueAt = effectiveDate (2026-05-01) + 21d = 2026-05-22.
+    expect(change?.retentionPromptDueAt?.toISOString().slice(0, 10)).toBe('2026-05-22');
+    expect(change?.retentionDecision).toBeNull();
+    expect(change?.scheduledTerminationAt).toBeNull();
+    // No CRM order created on disconnection commit.
+    expect(change?.crmServiceOrderId).toBeNull();
   });
 
   it('DOWNGRADE: persists negative-delta change', async () => {
     const { cookie } = await adminCookie();
-    const acct = await seedAccount({ clientName: 'Acme', currentArc: 600000 });
+    const acct = await seedAccount({
+      clientName: 'Acme',
+      currentArc: 600000,
+      externalCrmId: 'crm-acme-down',
+    });
 
     const res = await request(app)
       .post('/commercial-changes')
@@ -308,7 +339,12 @@ describe('Account update on CRM COMPLETED', () => {
     expect(Number(after?.currentArc)).toBe(720000);
   });
 
-  it('DISCONNECTION: account becomes TERMINATED only on COMPLETED', async () => {
+  it('DISCONNECTION + CRM COMPLETED does NOT terminate the account — scheduledTerminationAt is the source of truth', async () => {
+    // The CRM service order for a disconnection is created only after the
+    // day-21 PROCEED decision. Even when CRM races through to COMPLETED in
+    // < 10 days, the account stays in DISCONNECTING until the contractual
+    // 10-day notice window expires (scheduledTerminationAt). The lazy
+    // sweep does the actual termination.
     process.env.CRM_SERVICE_ORDERS_ENABLED = 'true';
     const { CrmStub, setCrmClientForTests } = await import(
       '../src/services/integrations/crm/index.js'
@@ -334,20 +370,32 @@ describe('Account update on CRM COMPLETED', () => {
       .attach('approvalFile', PDF_BUFFER, 'disco.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(201);
 
-    // Pre-COMPLETED: still ACTIVE.
+    // Day 0: PROBABLE_CHURN. No CRM order yet.
     let after = await prisma.account.findUnique({ where: { id: acct.id } });
-    expect(after?.contractStatus).toBe('ACTIVE');
-    expect(Number(after?.currentArc)).toBe(900000);
+    expect(after?.contractStatus).toBe('PROBABLE_CHURN');
+    expect(stub.serviceOrders).toHaveLength(0);
 
-    // CRM advances to COMPLETED → SAM refresh.
+    // Simulate day 21+ → SAM picks PROCEED. CRM order is now raised.
+    await prisma.commercialChange.update({
+      where: { id: res.body.commercialChange.id },
+      data: { retentionPromptDueAt: new Date('2026-05-01') },
+    });
+    const decideRes = await request(app)
+      .post(`/commercial-changes/${res.body.commercialChange.id}/retention-decision`)
+      .set('Cookie', cookie)
+      .send({ decision: 'PROCEED' });
+    expect(decideRes.status).toBe(200);
+    expect(stub.serviceOrders).toHaveLength(1);
+
+    // CRM races to COMPLETED — but the account does NOT terminate yet.
     stub.serviceOrders[0]!.status = 'COMPLETED';
     await request(app)
       .post(`/commercial-changes/${res.body.commercialChange.id}/refresh-status`)
       .set('Cookie', cookie);
 
     after = await prisma.account.findUnique({ where: { id: acct.id } });
-    expect(after?.contractStatus).toBe('TERMINATED');
-    expect(Number(after?.currentArc)).toBe(0);
+    expect(after?.contractStatus).toBe('DISCONNECTING');
+    expect(Number(after?.currentArc)).toBe(900000);
   });
 });
 
@@ -568,7 +616,10 @@ describe('CRM service-order bridge', () => {
     expect(row?.approvalFilePublicId).toMatch(/^sam-software\/po-and-mail-acceptance\//);
   });
 
-  it('DISCONNECTION: forwards category/sub-category, no ARC math', async () => {
+  it('DISCONNECTION: CRM order is raised on day-21 PROCEED, not on commit', async () => {
+    // Day 0 commit no longer hits CRM — the disconnection sits in the
+    // 21-day probable-churn window first. Only when SAM picks PROCEED does
+    // the service-order POST go out with category/sub-category and no ARC.
     process.env.CRM_SERVICE_ORDERS_ENABLED = 'true';
     const { CrmStub, setCrmClientForTests } = await import(
       '../src/services/integrations/crm/index.js'
@@ -582,7 +633,7 @@ describe('CRM service-order bridge', () => {
       currentArc: 900000,
       externalCrmId: 'crm-gone-1',
     });
-    const res = await request(app)
+    const commit = await request(app)
       .post('/commercial-changes')
       .set('Cookie', cookie)
       .field('accountId', acct.id)
@@ -593,16 +644,35 @@ describe('CRM service-order bridge', () => {
       .field('disconnectionSubCategoryId', 'sub-1')
       .field('disconnectionReason', 'Office closing')
       .attach('approvalFile', PDF_BUFFER, 'disco.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
-    expect(res.status).toBe(201);
+    expect(commit.status).toBe(201);
+    expect(commit.body.crm).toEqual({ ok: 'probable-churn' });
+    // No CRM order yet.
+    expect(stub.createServiceOrderCalls).toHaveLength(0);
+
+    // Backdate the prompt and pick PROCEED — now CRM gets called.
+    await prisma.commercialChange.update({
+      where: { id: commit.body.commercialChange.id },
+      data: { retentionPromptDueAt: new Date('2026-05-01') },
+    });
+    const decide = await request(app)
+      .post(`/commercial-changes/${commit.body.commercialChange.id}/retention-decision`)
+      .set('Cookie', cookie)
+      .send({ decision: 'PROCEED' });
+    expect(decide.status).toBe(200);
+
     const call = stub.createServiceOrderCalls[0]!;
     expect(call.orderType).toBe('DISCONNECTION');
+    // SAM-local slug IDs are forwarded to CRM — both systems must agree on
+    // the taxonomy (CRM seeds matching rows; see docs/INTEGRATION_CRM.md).
     expect(call.disconnectionCategoryId).toBe('cat-1');
     expect(call.disconnectionSubCategoryId).toBe('sub-1');
     expect(call.disconnectionReason).toBe('Office closing');
-    // No ARC math for DISCONNECTION
+    // Notes carry the SAM ref + human-readable reason for the CRM operator
+    // even when the slug IDs are valid.
+    expect(call.notes).toContain('SAM-');
+    expect(call.notes).toContain('Office closing');
     expect(call.newArc).toBeUndefined();
     expect(call.newBandwidth).toBeUndefined();
-    expect(res.body.crm.status).toBe('PENDING_APPROVAL');
   });
 
   it('surfaces CRM 4xx as crm.ok=false but still saves SAM row', async () => {
@@ -663,12 +733,15 @@ describe('CRM service-order bridge', () => {
     expect(res.body.error).toMatch(/disconnectionCategoryId/);
   });
 
-  it('crm.ok=false when account has no externalCrmId', async () => {
+  it('UPGRADE on Excel-imported account (no externalCrmId): applies account state immediately', async () => {
+    // No CRM service-order can be raised — there's nothing to wait on.
+    // The dashboard must reflect the change at once.
     process.env.CRM_SERVICE_ORDERS_ENABLED = 'true';
     const { cookie } = await adminCookie();
     const acct = await seedAccount({
-      clientName: 'NoCrm',
-      currentArc: 120000,
+      clientName: 'ExcelCo',
+      currentArc: 600000,
+      bandwidthMbps: 100,
       externalCrmId: null,
     });
     const res = await request(app)
@@ -676,12 +749,76 @@ describe('CRM service-order bridge', () => {
       .set('Cookie', cookie)
       .field('accountId', acct.id)
       .field('changeType', 'UPGRADE')
-      .field('newArc', '240000')
+      .field('newArc', '720000')
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(201);
-    expect(res.body.crm.ok).toBe(false);
-    expect(res.body.crm.error).toMatch(/externalCrmId/);
+    expect(res.body.crm).toEqual({ ok: 'local-only' });
+
+    // Account row updated immediately — dashboards read account.currentArc.
+    const after = await prisma.account.findUnique({ where: { id: acct.id } });
+    expect(Number(after?.currentArc)).toBe(720000);
+    expect(after?.bandwidthMbps).toBe(200);
+
+    // Idempotency marker stamped on the change row.
+    const change = await prisma.commercialChange.findUnique({
+      where: { id: res.body.commercialChange.id },
+    });
+    expect(change?.accountAppliedAt).not.toBeNull();
+  });
+
+  it('DISCONNECTION on Excel-imported account: probable-churn applies the same way (no CRM, no immediate termination)', async () => {
+    // Per design: 21-day retention window applies to all customers
+    // regardless of CRM-sync status. Imported customers don't skip it.
+    process.env.CRM_SERVICE_ORDERS_ENABLED = 'true';
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'ExcelGone',
+      currentArc: 900000,
+      externalCrmId: null,
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'DISCONNECTION')
+      .field('newArc', '0')
+      .field('effectiveDate', '2026-05-01')
+      .field('reason', 'Customer churn')
+      .field('disconnectionCategoryId', '00000000-0000-0000-0000-000000000001')
+      .field('disconnectionSubCategoryId', '00000000-0000-0000-0000-000000000002')
+      .attach('approvalFile', PDF_BUFFER, 'disco.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
+    expect(res.status).toBe(201);
+    expect(res.body.crm).toEqual({ ok: 'probable-churn' });
+
+    const after = await prisma.account.findUnique({ where: { id: acct.id } });
+    expect(after?.contractStatus).toBe('PROBABLE_CHURN');
+    // Customer still pays — ARC unchanged until day 31.
+    expect(Number(after?.currentArc)).toBe(900000);
+  });
+
+  it('local-only path runs even when the CRM kill-switch is off', async () => {
+    // For accounts without externalCrmId, the kill-switch is irrelevant —
+    // there's no CRM call to gate. Apply immediately either way.
+    process.env.CRM_SERVICE_ORDERS_ENABLED = 'false';
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'ExcelCo2',
+      currentArc: 600000,
+      externalCrmId: null,
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'DOWNGRADE')
+      .field('newArc', '480000')
+      .field('effectiveDate', '2026-05-01')
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
+    expect(res.status).toBe(201);
+    expect(res.body.crm).toEqual({ ok: 'local-only' });
+    const after = await prisma.account.findUnique({ where: { id: acct.id } });
+    expect(Number(after?.currentArc)).toBe(480000);
   });
 });

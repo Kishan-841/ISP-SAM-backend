@@ -6,6 +6,7 @@ export const dashboardRouter = Router();
 dashboardRouter.use(requireAuth);
 dashboardRouter.get('/existing-base', dashboardController.existingBase);
 dashboardRouter.get('/new-base', dashboardController.newBase);
+dashboardRouter.get('/changes', dashboardController.bucketChanges);
 dashboardRouter.get(
   '/team-performance',
   requireRole('ADMIN', 'SAM_HEAD'),

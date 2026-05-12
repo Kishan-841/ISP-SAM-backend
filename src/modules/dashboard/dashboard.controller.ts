@@ -1,4 +1,5 @@
 import type { Request, Response } from 'express';
+import type { CommercialChangeType, KittyType } from '@prisma/client';
 import {
   dashboardService,
   computeNewBase,
@@ -6,9 +7,17 @@ import {
 } from './dashboard.service.js';
 import { computeTeamPerformance } from './team-performance.service.js';
 import { computeAlerts } from './alerts.service.js';
+import { getBucketChanges } from './bucket-changes.service.js';
 import type { AuthedRequest } from '../auth/auth.middleware.js';
 
 const QUARTERS = ['Q1', 'Q2', 'Q3', 'Q4'] as const;
+const KITTY_TYPES: readonly KittyType[] = ['BASE', 'NEW'];
+const BUCKETS: readonly CommercialChangeType[] = [
+  'UPGRADE',
+  'DOWNGRADE',
+  'RATE_REVISION',
+  'DISCONNECTION',
+];
 
 export const dashboardController = {
   async existingBase(req: Request, res: Response) {
@@ -40,6 +49,38 @@ export const dashboardController = {
       return;
     }
     const data = await computeAlerts({ requester: req.user });
+    res.json(data);
+  },
+
+  async bucketChanges(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const rawKitty = typeof req.query.kittyType === 'string' ? req.query.kittyType : '';
+    const rawBucket = typeof req.query.bucket === 'string' ? req.query.bucket : '';
+    const rawQuarter = typeof req.query.quarter === 'string' ? req.query.quarter : '';
+
+    if (!(KITTY_TYPES as readonly string[]).includes(rawKitty)) {
+      res.status(400).json({ error: 'kittyType must be BASE or NEW' });
+      return;
+    }
+    if (!(BUCKETS as readonly string[]).includes(rawBucket)) {
+      res.status(400).json({
+        error: 'bucket must be UPGRADE, DOWNGRADE, RATE_REVISION or DISCONNECTION',
+      });
+      return;
+    }
+    const quarter: FyQuarter | undefined = (QUARTERS as readonly string[]).includes(rawQuarter)
+      ? (rawQuarter as FyQuarter)
+      : undefined;
+
+    const data = await getBucketChanges({
+      kittyType: rawKitty as KittyType,
+      bucket: rawBucket as CommercialChangeType,
+      quarter,
+      requester: req.user,
+    });
     res.json(data);
   },
 };

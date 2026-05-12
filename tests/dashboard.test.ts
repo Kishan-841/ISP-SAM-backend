@@ -69,6 +69,39 @@ describe('GET /dashboard/existing-base', () => {
 });
 
 describe('GET /dashboard/existing-base — waterfall aggregation', () => {
+  it('keeps precision for small (sub-lakh) deltas so the dashboard card never reads zero', async () => {
+    // Real-world regression: a ₹4,000 upgrade on a small Excel-imported customer
+    // (96,000 → 100,000) used to round to 0.0 lakh in the API and render as
+    // "₹0" on the bucket card, despite the change being counted. Sub-lakh
+    // precision (≤₹1,000 granularity) is required to keep the card honest.
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    const acct = await seedAccount({
+      kittyType: 'BASE',
+      currentArc: 100000,
+      startOfPeriodArc: 96000,
+    });
+    await prisma.commercialChange.create({
+      data: {
+        accountId: acct.id,
+        changeType: 'UPGRADE',
+        oldArc: 96000,
+        newArc: 100000,
+        effectiveDate: new Date('2026-05-11'),
+        clientApprovalAttached: true,
+        createdBy: admin.id,
+      },
+    });
+    const token = await tokenFor(admin.id, 'ADMIN');
+    const res = await authedGet(app, '/dashboard/existing-base', token);
+    expect(res.body.upgrades.count).toBe(1);
+    // Without sub-lakh precision this would be 0; the bucket card must show
+    // a non-zero amount because the underlying delta is non-zero (4000 = 0.04L).
+    expect(res.body.upgrades.arcAddedLakh).toBeGreaterThan(0);
+    // 4000 / 100000 = 0.04. With ₹1K granularity (2 decimal lakhs) we round
+    // to 0.04 exactly. Frontend multiplies back → 4000 → "₹4K".
+    expect(res.body.upgrades.arcAddedLakh).toBeCloseTo(0.04, 2);
+  });
+
   it('aggregates UPGRADE: 1 count, ARC added', async () => {
     const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
     const acct = await seedAccount({
@@ -121,7 +154,7 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     expect(res.body.downgrades.arcReducedLakh).toBeCloseTo(1.2, 1);
   });
 
-  it('aggregates DISCONNECTION as full ARC lost', async () => {
+  it('aggregates DISCONNECTION as full ARC lost — only after the 10-day notice has applied', async () => {
     const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
     const acct = await seedAccount({
       kittyType: 'BASE',
@@ -129,6 +162,9 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
       startOfPeriodArc: 1200000,
       contractStatus: 'TERMINATED',
     });
+    // accountAppliedAt set = lazy sweep has terminated this customer.
+    // Disconnections still in the probable-churn window have accountAppliedAt
+    // = null and are reported in `probableChurn`, not `terminations`.
     await prisma.commercialChange.create({
       data: {
         accountId: acct.id,
@@ -138,6 +174,7 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
         effectiveDate: new Date('2026-04-15'),
         clientApprovalAttached: true,
         createdBy: admin.id,
+        accountAppliedAt: new Date('2026-05-16'),
       },
     });
 
@@ -146,6 +183,35 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     expect(res.body.terminations.count).toBe(1);
     // 1200000 = 12L
     expect(res.body.terminations.arcLostLakh).toBeCloseTo(12, 0);
+  });
+
+  it('counts probable-churn accounts separately, drops them from Current ARC', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    // ACTIVE account contributing to Current ARC.
+    await seedAccount({ kittyType: 'BASE', currentArc: 600000, contractStatus: 'ACTIVE' });
+    // Customer raised a disconnection — sitting in the 21-day window.
+    await seedAccount({
+      kittyType: 'BASE',
+      currentArc: 900000,
+      startOfPeriodArc: 900000,
+      contractStatus: 'PROBABLE_CHURN',
+    });
+    // Customer past day 21 → DISCONNECTING.
+    await seedAccount({
+      kittyType: 'BASE',
+      currentArc: 400000,
+      startOfPeriodArc: 400000,
+      contractStatus: 'DISCONNECTING',
+    });
+
+    const token = await tokenFor(admin.id, 'ADMIN');
+    const res = await authedGet(app, '/dashboard/existing-base', token);
+    // Current ARC excludes both at-risk customers. Only the 600K ACTIVE one.
+    expect(res.body.currentArcLakh).toBeCloseTo(6, 1);
+    expect(res.body.currentCustomers).toBe(1);
+    // Probable churn block carries them.
+    expect(res.body.probableChurn.count).toBe(2);
+    expect(res.body.probableChurn.arcAtRiskLakh).toBeCloseTo(13, 1);
   });
 
   it('aggregates RATE_REVISION', async () => {

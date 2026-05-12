@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type { CommercialChangeType, Prisma, UserRole } from '@prisma/client';
 import { prisma } from '../../prisma.js';
 import { buildAccountsTeamDraft, type EmailDraft } from './notification-bridge.js';
+import { lookupDisconnectionLabels } from './disconnection-reasons.js';
 import {
   getCrmClient,
   CrmHttpError,
@@ -56,12 +57,27 @@ export type CommitResult = {
     crmStatus: string | null;
   };
   emailDraft: EmailDraft;
-  /** Outcome of the CRM service-order call. Null when the CRM bridge is disabled. */
+  /**
+   * Outcome of the CRM service-order call.
+   *  - `ok: true`              — CRM order created
+   *  - `ok: false`             — CRM call attempted and failed
+   *  - `ok: 'disabled'`        — CRM kill-switch is off
+   *  - `ok: 'local-only'`      — account has no externalCrmId (Excel-imported);
+   *                              the change was applied immediately.
+   *  - `ok: 'probable-churn'`  — DISCONNECTION rows enter the 21-day retention
+   *                              window. No CRM order is raised until SAM
+   *                              picks PROCEED on day 21.
+   */
   crm:
     | { ok: true; orderId: string; orderNumber: string; status: string }
     | { ok: false; error: string; status?: number }
-    | { ok: 'disabled' };
+    | { ok: 'disabled' }
+    | { ok: 'local-only' }
+    | { ok: 'probable-churn' };
 };
+
+export const PROBABLE_CHURN_WINDOW_DAYS = 21;
+export const DISCONNECTION_NOTICE_DAYS = 10;
 
 export const commercialChangesService = {
   async commit(input: CommitInput): Promise<CommitResult> {
@@ -172,18 +188,37 @@ export const commercialChangesService = {
     });
 
     // 3. Forward to CRM as a service order (gated by CRM_SERVICE_ORDERS_ENABLED).
+    //    For accounts without an externalCrmId (Excel-imported / never synced
+    //    from CRM), there is no service order to raise — apply the change to
+    //    the account row immediately so dashboards reflect it. This branch
+    //    runs irrespective of the CRM kill-switch since the kill-switch only
+    //    gates the outbound CRM call, which doesn't apply here.
+    //
+    //    DISCONNECTION is special: it always enters the 21-day probable-churn
+    //    window first (regardless of CRM-sync status). No CRM order is raised
+    //    until SAM picks PROCEED on the day-21 retention prompt — that path
+    //    runs in retentionDecision() below.
     const crmEnabled = process.env.CRM_SERVICE_ORDERS_ENABLED === 'true';
     let crm: CommitResult['crm'];
     let crmServiceOrderId: string | null = null;
     let crmOrderNumber: string | null = null;
     let crmStatus: string | null = null;
-    if (!crmEnabled) {
-      crm = { ok: 'disabled' };
+    // Auto-retain hook: if the account is currently in PROBABLE_CHURN and SAM
+    // is raising a non-disconnection commercial change, the customer is
+    // staying — cancel the pending disconnection as RETAIN. Mirrors the
+    // "Retain → opens rate-revision form" flow on the Probable Churn page.
+    if (input.changeType !== 'DISCONNECTION' && account.contractStatus === 'PROBABLE_CHURN') {
+      await autoRetainPendingDisconnection(input.accountId, input.performedByUserId);
+    }
+
+    if (input.changeType === 'DISCONNECTION') {
+      await enterProbableChurn(result.id);
+      crm = { ok: 'probable-churn' };
     } else if (!account.externalCrmId) {
-      crm = {
-        ok: false,
-        error: 'Account has no externalCrmId — was it imported via the CRM webhook?',
-      };
+      await applyChangeToAccount(result.id);
+      crm = { ok: 'local-only' };
+    } else if (!crmEnabled) {
+      crm = { ok: 'disabled' };
     } else {
       try {
         const crmInput = buildServiceOrderInput(
@@ -359,7 +394,15 @@ export const commercialChangesService = {
     }
 
     // CRM has finished — mirror the change onto the account row exactly once.
-    if (updated.crmStatus === 'COMPLETED' && !updated.accountAppliedAt) {
+    // DISCONNECTION rows are NOT terminated here: even if CRM races through
+    // PENDING_NOC → COMPLETED in under 10 days, the contractual notice
+    // period (scheduledTerminationAt) is the source of truth. The lazy
+    // sweep terminates the account when that date passes.
+    if (
+      updated.crmStatus === 'COMPLETED' &&
+      !updated.accountAppliedAt &&
+      updated.changeType !== 'DISCONNECTION'
+    ) {
       return applyChangeToAccount(updated.id);
     }
     return updated;
@@ -398,7 +441,280 @@ export const commercialChangesService = {
     }
     return updated;
   },
+
+  /**
+   * Day-21 retention prompt outcome. SAM picks RETAIN (customer stays, account
+   * returns to ACTIVE) or PROCEED (account moves to DISCONNECTING, scheduled
+   * for termination in 10 days; CRM service-order is raised if synced).
+   *
+   * Authorization is handled at the controller layer. Validation:
+   *   - change must be a DISCONNECTION row
+   *   - decision must not have been set already (terminal state)
+   *   - PROCEED requires retentionPromptDueAt <= today (RETAIN is allowed any
+   *     time — a customer can change their mind mid-window)
+   */
+  async retentionDecision(
+    commercialChangeId: string,
+    decision: 'RETAIN' | 'PROCEED',
+    performedByUserId: string,
+  ) {
+    const change = await prisma.commercialChange.findUnique({
+      where: { id: commercialChangeId },
+      include: { account: true },
+    });
+    if (!change) throw new Error('Commercial change not found');
+    if (change.changeType !== 'DISCONNECTION') {
+      throw new Error('Retention decision only applies to disconnection rows');
+    }
+    if (change.retentionDecision) {
+      throw new Error('Retention has already been decided for this disconnection');
+    }
+    const today = startOfDayUTC(new Date());
+    if (
+      decision === 'PROCEED' &&
+      change.retentionPromptDueAt &&
+      change.retentionPromptDueAt.getTime() > today.getTime()
+    ) {
+      throw new Error('PROCEED is only allowed once the 21-day retention window has elapsed');
+    }
+
+    const decidedAt = new Date();
+
+    if (decision === 'RETAIN') {
+      const [updated] = await prisma.$transaction([
+        prisma.commercialChange.update({
+          where: { id: commercialChangeId },
+          data: { retentionDecision: 'RETAIN', retentionDecidedAt: decidedAt },
+        }),
+        prisma.account.update({
+          where: { id: change.accountId },
+          data: { contractStatus: 'ACTIVE' },
+        }),
+        prisma.auditLog.create({
+          data: {
+            entityType: 'CommercialChange',
+            entityId: commercialChangeId,
+            action: 'RETENTION_RETAINED',
+            performedBy: performedByUserId,
+            payload: {
+              accountId: change.accountId,
+              previousStatus: change.account.contractStatus,
+            },
+          },
+        }),
+      ]);
+      return updated;
+    }
+
+    // PROCEED branch — schedule termination, optionally raise CRM order.
+    const scheduledTermination = startOfDayUTC(decidedAt);
+    scheduledTermination.setUTCDate(scheduledTermination.getUTCDate() + DISCONNECTION_NOTICE_DAYS);
+
+    // Forward the disconnection to the CRM so both systems stay in sync —
+    // the customer is being disconnected on the CRM side once the 10-day
+    // notice expires, just as on SAM. Sends SAM-local slug IDs (see
+    // disconnection-reasons.ts) which require matching rows on the CRM
+    // side — see docs/INTEGRATION_CRM.md for the exact seed expected.
+    //
+    // If the CRM rejects (missing rows / validation), we persist
+    // crmStatus='FAILED' and capture the error in the audit log instead of
+    // failing the whole PROCEED. The SAM-side state still advances because
+    // SAM has committed to disconnecting the customer; the operator can
+    // chase the CRM hand-off separately.
+    let crmServiceOrderId: string | null = null;
+    let crmOrderNumber: string | null = null;
+    let crmStatus: string | null = null;
+    let crmError: string | null = null;
+    const crmEnabled = process.env.CRM_SERVICE_ORDERS_ENABLED === 'true';
+    if (crmEnabled && change.account.externalCrmId) {
+      const labels = lookupDisconnectionLabels(
+        change.disconnectionCategoryId,
+        change.disconnectionSubCategoryId,
+      );
+      const samRef = `SAM-${change.id.slice(0, 8).toUpperCase()}`;
+      const noteParts: string[] = [samRef];
+      if (labels.category) {
+        noteParts.push(
+          `Reason: ${labels.category}${labels.subCategory ? ` — ${labels.subCategory}` : ''}`,
+        );
+      }
+      if (change.disconnectionReason) noteParts.push(`Details: ${change.disconnectionReason}`);
+
+      try {
+        const order = await getCrmClient().createServiceOrder({
+          customerId: change.account.externalCrmId,
+          orderType: 'DISCONNECTION',
+          disconnectionCategoryId: change.disconnectionCategoryId ?? undefined,
+          disconnectionSubCategoryId: change.disconnectionSubCategoryId ?? undefined,
+          disconnectionReason: change.disconnectionReason ?? undefined,
+          approvalFileUrl: change.approvalFileUrl ?? undefined,
+          poFileUrl: change.poFileUrl ?? undefined,
+          notes: noteParts.join(' | '),
+        });
+        crmServiceOrderId = order.id;
+        crmOrderNumber = order.orderNumber;
+        crmStatus = order.status;
+      } catch (err) {
+        crmError =
+          err instanceof CrmHttpError
+            ? `CRM ${err.statusCode}: ${err.message}`
+            : err instanceof Error
+              ? err.message
+              : 'CRM call failed';
+        crmStatus = 'FAILED';
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[retentionDecision PROCEED ${commercialChangeId}] CRM service-order failed:`,
+          crmError,
+        );
+      }
+    }
+
+    await prisma.$transaction([
+      prisma.commercialChange.update({
+        where: { id: commercialChangeId },
+        data: {
+          retentionDecision: 'PROCEED',
+          retentionDecidedAt: decidedAt,
+          scheduledTerminationAt: scheduledTermination,
+          // crmStatus is set on both the success path ('PENDING_APPROVAL'/…)
+          // and the failure path ('FAILED'). null is reserved for "didn't
+          // even try" (kill-switch off / Excel-imported customer).
+          ...(crmServiceOrderId
+            ? { crmServiceOrderId, crmOrderNumber, crmStatus, crmStatusUpdatedAt: decidedAt }
+            : crmStatus
+              ? { crmStatus, crmStatusUpdatedAt: decidedAt }
+              : {}),
+        },
+      }),
+      prisma.account.update({
+        where: { id: change.accountId },
+        data: { contractStatus: 'DISCONNECTING' },
+      }),
+      prisma.auditLog.create({
+        data: {
+          entityType: 'CommercialChange',
+          entityId: commercialChangeId,
+          action: 'RETENTION_PROCEEDED',
+          performedBy: performedByUserId,
+          payload: {
+            accountId: change.accountId,
+            scheduledTerminationAt: scheduledTermination.toISOString(),
+            crmServiceOrderId,
+            crmOrderNumber,
+            crmStatus,
+            crmError,
+          },
+        },
+      }),
+    ]);
+
+    return prisma.commercialChange.findUnique({ where: { id: commercialChangeId } });
+  },
 };
+
+/**
+ * Lazy-termination sweep. Called from any read path that needs an accurate
+ * picture of contract status — e.g. dashboard metrics, customer lists, the
+ * /probable-churn endpoint. Any DISCONNECTING row whose scheduledTerminationAt
+ * has passed gets terminated via applyChangeToAccount (idempotent).
+ *
+ * Intentionally not a cron — running it on read keeps state convergence in a
+ * single code path. The work is bounded (typically zero or a handful of rows
+ * per call) and the existing accountAppliedAt marker prevents double-apply.
+ */
+export async function sweepDueTerminations(): Promise<void> {
+  const today = startOfDayUTC(new Date());
+  const due = await prisma.commercialChange.findMany({
+    where: {
+      changeType: 'DISCONNECTION',
+      retentionDecision: 'PROCEED',
+      scheduledTerminationAt: { lte: today },
+      accountAppliedAt: null,
+    },
+    select: { id: true },
+  });
+  for (const c of due) {
+    await applyChangeToAccount(c.id);
+  }
+}
+
+/**
+ * Day 0 of a disconnection — flip the account to PROBABLE_CHURN and stamp
+ * the day-21 prompt due date on the commercial-change row. Single transaction
+ * so a crash mid-way can't strand half the state change.
+ */
+/**
+ * Cancel the in-flight disconnection on an account when SAM commits a
+ * non-disconnection commercial change against it. Surface usage: the Retain
+ * button on the Probable Churn page deep-links into the rate-revision form
+ * pre-filled with this customer; submitting that form lands here and the
+ * pending disconnection is resolved as RETAIN.
+ *
+ * No-op if there's no pending disconnection. Re-uses RETAIN semantics so the
+ * audit trail looks the same as a manual day-21 RETAIN.
+ */
+async function autoRetainPendingDisconnection(
+  accountId: string,
+  performedByUserId: string,
+): Promise<void> {
+  const pending = await prisma.commercialChange.findFirst({
+    where: {
+      accountId,
+      changeType: 'DISCONNECTION',
+      retentionDecision: null,
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+  if (!pending) return;
+  await prisma.$transaction([
+    prisma.commercialChange.update({
+      where: { id: pending.id },
+      data: { retentionDecision: 'RETAIN', retentionDecidedAt: new Date() },
+    }),
+    prisma.account.update({
+      where: { id: accountId },
+      data: { contractStatus: 'ACTIVE' },
+    }),
+    prisma.auditLog.create({
+      data: {
+        entityType: 'CommercialChange',
+        entityId: pending.id,
+        action: 'RETENTION_RETAINED_AUTO',
+        performedBy: performedByUserId,
+        payload: {
+          accountId,
+          trigger: 'non-disconnection-commit-on-probable-churn',
+        },
+      },
+    }),
+  ]);
+}
+
+async function enterProbableChurn(commercialChangeId: string): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    const change = await tx.commercialChange.findUnique({
+      where: { id: commercialChangeId },
+    });
+    if (!change) throw new Error('Commercial change not found');
+    const prompt = startOfDayUTC(change.effectiveDate);
+    prompt.setUTCDate(prompt.getUTCDate() + PROBABLE_CHURN_WINDOW_DAYS);
+    await tx.commercialChange.update({
+      where: { id: commercialChangeId },
+      data: { retentionPromptDueAt: prompt },
+    });
+    await tx.account.update({
+      where: { id: change.accountId },
+      data: { contractStatus: 'PROBABLE_CHURN' },
+    });
+  });
+}
+
+function startOfDayUTC(d: Date): Date {
+  const out = new Date(d);
+  out.setUTCHours(0, 0, 0, 0);
+  return out;
+}
 
 /**
  * Mirror a commercial change onto its account row. Idempotent via the

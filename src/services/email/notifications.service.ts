@@ -8,7 +8,11 @@ import {
   buildCrmStatusChangeEmail,
   type CrmStatusChangeKind,
 } from './templates/crm-status-change.js';
-import { buildMomToCustomerEmail } from './templates/mom-to-customer.js';
+import {
+  buildMomToCustomerEmail,
+  type ActionItem as MomActionItem,
+  type Participant as MomParticipant,
+} from './templates/mom-to-customer.js';
 
 /**
  * One central place for every outbound notification the platform fires.
@@ -338,8 +342,22 @@ export async function sendMomToCustomer(input: {
   meetingScheduledAt: Date;
   meetingHeldAt: Date | null;
   meetingType: MeetingType;
+  location: string | null;
+  clientParticipants: MomParticipant[];
+  gazonParticipants: MomParticipant[];
+  actionItems: MomActionItem[];
   momContent: string;
   performedByUserId: string;
+  /** Override the To address (default: account.email). */
+  toOverride?: string | null;
+  /** Override the CC list (default: SAM Head + ACCOUNTS_TEAM_EMAIL). */
+  ccOverride?: string[] | null;
+  /** Override the subject (default: "Minutes of Meeting — <name> — <date>"). */
+  subjectOverride?: string | null;
+  /** SAM's role/title for signature, e.g. "AGM Service Assurance". */
+  samDesignation?: string | null;
+  /** SAM's phone for signature. */
+  samPhone?: string | null;
 }): Promise<{ status: AuditOutcome }> {
   const audit = {
     entityType: 'Meeting',
@@ -353,7 +371,7 @@ export async function sendMomToCustomer(input: {
     return { status: 'SKIPPED' };
   }
 
-  const customerEmail = input.account.email?.trim();
+  const customerEmail = input.toOverride?.trim() || input.account.email?.trim();
   if (!customerEmail) {
     await writeAudit(audit, 'MISCONFIGURED', 'Account has no customer email on record');
     return { status: 'MISCONFIGURED' };
@@ -369,11 +387,16 @@ export async function sendMomToCustomer(input: {
       })
     : null;
 
-  // Compose recipients.
-  const cc: string[] = [];
-  if (owningSam?.samHead?.email) cc.push(owningSam.samHead.email);
-  const accountsEmail = process.env.ACCOUNTS_TEAM_EMAIL?.trim();
-  if (accountsEmail) cc.push(accountsEmail);
+  // Compose recipients. If caller supplies an explicit CC list, use it verbatim
+  // (empty array = no CC). Otherwise fall back to SAM Head + accounts team.
+  let cc: string[] = [];
+  if (input.ccOverride) {
+    cc = input.ccOverride.map((s) => s.trim()).filter(Boolean);
+  } else {
+    if (owningSam?.samHead?.email) cc.push(owningSam.samHead.email);
+    const accountsEmail = process.env.ACCOUNTS_TEAM_EMAIL?.trim();
+    if (accountsEmail) cc.push(accountsEmail);
+  }
 
   const bcc: string[] = [];
   if (owningSam?.email) bcc.push(owningSam.email);
@@ -385,7 +408,14 @@ export async function sendMomToCustomer(input: {
     meetingScheduledAt: input.meetingScheduledAt,
     meetingHeldAt: input.meetingHeldAt,
     meetingType: input.meetingType,
+    location: input.location,
+    clientParticipants: input.clientParticipants,
+    gazonParticipants: input.gazonParticipants,
+    actionItems: input.actionItems,
     momContent: input.momContent,
+    subjectOverride: input.subjectOverride,
+    samDesignation: input.samDesignation,
+    samPhone: input.samPhone,
   });
 
   const message: EmailMessage = {

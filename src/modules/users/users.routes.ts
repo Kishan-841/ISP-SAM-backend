@@ -8,3 +8,5 @@ usersRouter.get('/', requireAuth, requireRole('ADMIN', 'SAM_HEAD'), usersControl
 usersRouter.get('/team', requireAuth, requireRole('ADMIN', 'SAM_HEAD'), usersController.team);
 usersRouter.get('/:id', requireAuth, requireRole('ADMIN', 'SAM_HEAD'), usersController.getById);
 usersRouter.post('/', requireAuth, requireRole('ADMIN'), usersController.create);
+usersRouter.patch('/:id', requireAuth, requireRole('ADMIN'), usersController.update);
+usersRouter.delete('/:id', requireAuth, requireRole('ADMIN'), usersController.remove);

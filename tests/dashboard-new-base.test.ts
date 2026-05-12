@@ -142,6 +142,72 @@ describe('GET /dashboard/new-base', () => {
     expect(res.body.earlyUpgrades.arcAddedLakh).toBeCloseTo(3.6, 1);
   });
 
+  it('NEW kitty: probable-churn customers drop from Current ARC, surface in probableChurn block', async () => {
+    const { token } = await adminCookie();
+    // Two NEW-kitty customers — one ACTIVE, one with a disconnection in flight.
+    // The "in flight" one has been raised by CRM webhook (externalCrmId set)
+    // and is sitting in the 21-day retention window.
+    await seedAccount({
+      kittyType: 'NEW',
+      currentArc: 400000,
+      contractStatus: 'ACTIVE',
+      onboardingDate: new Date('2026-04-10'),
+      externalCrmId: 'crm-active-1',
+    });
+    await seedAccount({
+      kittyType: 'NEW',
+      currentArc: 600000,
+      contractStatus: 'PROBABLE_CHURN',
+      onboardingDate: new Date('2026-04-15'),
+      externalCrmId: 'crm-pc-1',
+    });
+    await seedAccount({
+      kittyType: 'NEW',
+      currentArc: 800000,
+      contractStatus: 'DISCONNECTING',
+      onboardingDate: new Date('2026-04-20'),
+      externalCrmId: 'crm-disco-1',
+    });
+
+    const res = await authedGet(app, '/dashboard/new-base', token);
+    expect(res.status).toBe(200);
+    // Current ARC excludes both at-risk customers — only the 400K ACTIVE one.
+    expect(res.body.currentArcLakh).toBeCloseTo(4, 1);
+    expect(res.body.currentCustomers).toBe(1);
+    // ProbableChurn carries the other two: 600K + 800K = 14L.
+    expect(res.body.probableChurn.count).toBe(2);
+    expect(res.body.probableChurn.arcAtRiskLakh).toBeCloseTo(14, 1);
+  });
+
+  it('pending DISCONNECTION rows do NOT count as "Disconnections" until they fully terminate', async () => {
+    const { token, user } = await adminCookie();
+    const acct = await seedAccount({
+      kittyType: 'NEW',
+      currentArc: 600000,
+      contractStatus: 'PROBABLE_CHURN',
+      onboardingDate: new Date('2026-04-15'),
+      externalCrmId: 'crm-pending-disco',
+    });
+    // Pending disconnection — accountAppliedAt is null. Until the lazy
+    // sweep runs (post day 31), this stays out of the Disconnections bucket.
+    await prisma.commercialChange.create({
+      data: {
+        accountId: acct.id,
+        changeType: 'DISCONNECTION',
+        oldArc: 600000,
+        newArc: 0,
+        effectiveDate: new Date('2026-05-01'),
+        clientApprovalAttached: true,
+        createdBy: user.id,
+        retentionPromptDueAt: new Date('2026-05-22'),
+      },
+    });
+    const res = await authedGet(app, '/dashboard/new-base', token);
+    expect(res.body.terminations.count).toBe(0);
+    expect(res.body.terminations.arcLostLakh).toBe(0);
+    expect(res.body.probableChurn.count).toBe(1);
+  });
+
   it('returns the most recent additions (top 10) sorted desc', async () => {
     const { token } = await adminCookie();
     for (let i = 0; i < 12; i++) {

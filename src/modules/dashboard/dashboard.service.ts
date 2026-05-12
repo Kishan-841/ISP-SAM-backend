@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../prisma.js';
+import { sweepDueTerminations } from '../commercial-changes/commercial-changes.service.js';
 
 export type FyQuarter = 'Q1' | 'Q2' | 'Q3' | 'Q4';
 
@@ -50,6 +51,11 @@ export type NewBaseMetrics = {
   rateRevisions: { count: number; arcChangeLakh: number };
   terminations:  { count: number; arcLostLakh: number };
 
+  // NEW-kitty customers in the 21-day retention window or 10-day disconnecting
+  // window. Same semantics as ExistingBaseMetrics.probableChurn — their ARC
+  // is excluded from `currentArcLakh` and reported separately as "at risk".
+  probableChurn: { count: number; arcAtRiskLakh: number };
+
   // Velocity (by onboardingDate)
   addedThisMonth:   { count: number; arcLakh: number };
   addedThisQuarter: { count: number; arcLakh: number };
@@ -92,12 +98,22 @@ export type ExistingBaseMetrics = {
   downgrades: { count: number; arcReducedLakh: number };
   rateRevisions: { count: number; arcChangeLakh: number };
   terminations: { count: number; arcLostLakh: number };
+
+  // Customers in the 21-day probable-churn window or 10-day disconnecting
+  // window. Their ARC is excluded from `currentArcLakh` / `currentCustomers`
+  // and surfaced separately as "at risk" so SAM_HEAD can see how much
+  // revenue is on the line — the retention queue lives at /probable-churn.
+  probableChurn: { count: number; arcAtRiskLakh: number };
 };
 
 const LAKH = 100_000;
 
 export const dashboardService = {
   async existingBase(opts: { quarter?: FyQuarter } = {}): Promise<ExistingBaseMetrics> {
+    // Sweep any disconnections whose 10-day notice has expired so the
+    // dashboard reflects current truth before we read accounts/changes.
+    await sweepDueTerminations();
+
     // 1. BASE accounts snapshot — always anchored to April 1.
     const baseAccounts = await prisma.account.findMany({
       where: { kittyType: 'BASE' },
@@ -135,6 +151,7 @@ export const dashboardService = {
               changeType: true,
               oldArc: true,
               newArc: true,
+              accountAppliedAt: true,
             },
           });
 
@@ -164,18 +181,35 @@ export const dashboardService = {
           rateRevsArcChange += oldA - newA; // positive magnitude
           break;
         case 'DISCONNECTION':
-          terminationsCount++;
-          terminationsArcLost += oldA;
+          // Only count disconnections that have *actually* terminated the
+          // account. Rows still in the probable-churn / disconnecting
+          // window have `accountAppliedAt = null` and are surfaced in the
+          // separate probableChurn block.
+          if (c.accountAppliedAt) {
+            terminationsCount++;
+            terminationsArcLost += oldA;
+          }
           break;
       }
     }
 
-    // 3. Compute end-of-window state.
+    // 3. Probable churn — point-in-time, applies to both quarter and all-time
+    //    views. Customers sitting in the 21-day retention window or the
+    //    10-day notice window have their ARC excluded from `currentArcLakh`
+    //    and reported separately as "at risk".
+    const probableChurnAccounts = baseAccounts.filter(
+      (a) => a.contractStatus === 'PROBABLE_CHURN' || a.contractStatus === 'DISCONNECTING',
+    );
+    const probableChurnArc = probableChurnAccounts.reduce(
+      (sum, a) => sum + Number(a.currentArc),
+      0,
+    );
+
+    // 4. Compute end-of-window state.
     //    - No quarter filter (All Time): use the live accounts table — it's
-    //      the source of truth and includes any historical state changes that
-    //      may not have a corresponding commercial_change row.
-    //    - Quarter filter: replay window deltas on top of the start snapshot
-    //      to project end-of-quarter ARC + customer count.
+    //      the source of truth.
+    //    - Quarter filter: replay window deltas on top of the start snapshot.
+    //    In both cases, exclude probable-churn accounts from Current totals.
     const startArc = startOfPeriodArcSum;
     let currentArc: number;
     let currentCustomers: number;
@@ -183,12 +217,19 @@ export const dashboardService = {
     if (opts.quarter) {
       const netDeltaArc =
         upgradesArcAdded - downgradesArcReduced - rateRevsArcChange - terminationsArcLost;
-      currentArc = startArc + netDeltaArc;
+      currentArc = startArc + netDeltaArc - probableChurnArc;
       terminatedCount = terminationsCount;
-      currentCustomers = totalCustomers - terminationsCount;
+      currentCustomers = totalCustomers - terminationsCount - probableChurnAccounts.length;
     } else {
-      const liveActive = baseAccounts.filter((a) => a.contractStatus !== 'TERMINATED');
-      const liveTerminated = baseAccounts.length - liveActive.length;
+      const liveActive = baseAccounts.filter(
+        (a) =>
+          a.contractStatus !== 'TERMINATED' &&
+          a.contractStatus !== 'PROBABLE_CHURN' &&
+          a.contractStatus !== 'DISCONNECTING',
+      );
+      const liveTerminated = baseAccounts.filter(
+        (a) => a.contractStatus === 'TERMINATED',
+      ).length;
       currentArc = liveActive.reduce((sum, a) => sum + Number(a.currentArc), 0);
       currentCustomers = liveActive.length;
       terminatedCount = liveTerminated;
@@ -196,32 +237,46 @@ export const dashboardService = {
 
     return {
       totalCustomers,
-      totalBaseArcLakh: round1(startArc / LAKH),
+      totalBaseArcLakh: roundLakh(startArc / LAKH),
       currentCustomers,
-      currentArcLakh: round1(currentArc / LAKH),
+      currentArcLakh: roundLakh(currentArc / LAKH),
       terminatedCount,
       upgrades: {
         count: upgradesCount,
-        arcAddedLakh: round1(upgradesArcAdded / LAKH),
+        arcAddedLakh: roundLakh(upgradesArcAdded / LAKH),
       },
       downgrades: {
         count: downgradesCount,
-        arcReducedLakh: round1(downgradesArcReduced / LAKH),
+        arcReducedLakh: roundLakh(downgradesArcReduced / LAKH),
       },
       rateRevisions: {
         count: rateRevsCount,
-        arcChangeLakh: round1(rateRevsArcChange / LAKH),
+        arcChangeLakh: roundLakh(rateRevsArcChange / LAKH),
       },
       terminations: {
         count: terminationsCount,
-        arcLostLakh: round1(terminationsArcLost / LAKH),
+        arcLostLakh: roundLakh(terminationsArcLost / LAKH),
+      },
+      probableChurn: {
+        count: probableChurnAccounts.length,
+        arcAtRiskLakh: roundLakh(probableChurnArc / LAKH),
       },
     };
   },
 };
 
-function round1(n: number): number {
-  return Math.round(n * 10) / 10;
+/**
+ * Rounds a lakh-denominated number to 2 decimal places (~₹1K granularity).
+ *
+ * Previously this rounded to 1 decimal, which silently truncated sub-lakh
+ * deltas to zero — e.g. a ₹4,000 upgrade (96,000 → 100,000 ARC) rounded to
+ * 0.0L and the bucket card on the dashboard rendered as "₹0" despite the
+ * commercial change being counted. 2 decimals (₹0.01L = ₹1K) keeps small
+ * but meaningful deltas visible while still display-friendly downstream
+ * (`.toFixed(1)` callers re-round at render time).
+ */
+function roundLakh(n: number): number {
+  return Math.round(n * 100) / 100;
 }
 
 // ============================================================================
@@ -270,6 +325,10 @@ function daysBetween(later: Date, earlier: Date): number {
 export async function computeNewBase(
   now: Date = new Date(),
 ): Promise<NewBaseMetrics> {
+  // Sweep any disconnections whose 10-day notice has expired so this view
+  // reflects current truth — mirrors the existingBase entry point.
+  await sweepDueTerminations();
+
   const newAccounts = await prisma.account.findMany({
     where: { kittyType: 'NEW' },
     select: {
@@ -285,13 +344,24 @@ export async function computeNewBase(
     orderBy: { onboardingDate: 'desc' },
   });
 
-  const active = newAccounts.filter((a) => a.contractStatus !== 'TERMINATED');
+  // "Active" for this dashboard means ACTIVE in the operational sense —
+  // customers we're billing today. Customers in PROBABLE_CHURN or
+  // DISCONNECTING are still being billed but their ARC is at risk; they
+  // surface in the probableChurn block below, not in Current ARC.
+  const active = newAccounts.filter((a) => a.contractStatus === 'ACTIVE');
+  const probableChurnAccounts = newAccounts.filter(
+    (a) => a.contractStatus === 'PROBABLE_CHURN' || a.contractStatus === 'DISCONNECTING',
+  );
 
   // Components — mirrors existing-base. "Total" = all accounts ever onboarded
-  // (includes terminated). "Current" = active right now.
+  // (includes terminated + probable churn). "Current" = active-and-paying.
   const totalCustomers = newAccounts.length;
   const currentCustomers = active.length;
-  const terminatedCount = newAccounts.length - active.length;
+  const terminatedCount = newAccounts.filter((a) => a.contractStatus === 'TERMINATED').length;
+  const probableChurnArc = probableChurnAccounts.reduce(
+    (s, a) => s + Number(a.currentArc),
+    0,
+  );
   // Total ARC anchors on each account's onboarding-time ARC (`startOfPeriodArc`)
   // so post-onboarding commercial changes don't pollute the headline.
   const totalNewArc = newAccounts.reduce(
@@ -310,7 +380,7 @@ export async function computeNewBase(
       (a) => startOfDayUTC(a.onboardingDate) >= since,
     );
     const arc = within.reduce((s, a) => s + Number(a.currentArc), 0);
-    return { count: within.length, arcLakh: round1(arc / LAKH) };
+    return { count: within.length, arcLakh: roundLakh(arc / LAKH) };
   };
 
   const addedThisMonth   = sumIn(monthStart);
@@ -373,6 +443,7 @@ export async function computeNewBase(
             oldArc: true,
             newArc: true,
             effectiveDate: true,
+            accountAppliedAt: true,
           },
         });
   const onboardingByAccount = new Map(newAccounts.map((a) => [a.id, a.onboardingDate]));
@@ -412,8 +483,13 @@ export async function computeNewBase(
         rateRevsArcChange += oldA - newA;
         break;
       case 'DISCONNECTION':
-        terminationsCount++;
-        terminationsArcLost += oldA;
+        // Only count fully-terminated disconnections — rows still in the
+        // probable-churn / disconnecting window have accountAppliedAt = null
+        // and are reported in the probableChurn block instead.
+        if (c.accountAppliedAt) {
+          terminationsCount++;
+          terminationsArcLost += oldA;
+        }
         break;
     }
 
@@ -441,31 +517,35 @@ export async function computeNewBase(
     companyName: a.companyName,
     customerCode: a.customerCode,
     onboardingDate: a.onboardingDate.toISOString().slice(0, 10),
-    currentArcLakh: round1(Number(a.currentArc) / LAKH),
+    currentArcLakh: roundLakh(Number(a.currentArc) / LAKH),
     contractStatus: a.contractStatus,
   }));
 
   return {
     totalCustomers,
-    totalNewArcLakh: round1(totalNewArc / LAKH),
+    totalNewArcLakh: roundLakh(totalNewArc / LAKH),
     currentCustomers,
-    currentArcLakh: round1(currentArc / LAKH),
+    currentArcLakh: roundLakh(currentArc / LAKH),
     terminatedCount,
     upgrades: {
       count: upgradesCount,
-      arcAddedLakh: round1(upgradesArcAdded / LAKH),
+      arcAddedLakh: roundLakh(upgradesArcAdded / LAKH),
     },
     downgrades: {
       count: downgradesCount,
-      arcReducedLakh: round1(downgradesArcReduced / LAKH),
+      arcReducedLakh: roundLakh(downgradesArcReduced / LAKH),
     },
     rateRevisions: {
       count: rateRevsCount,
-      arcChangeLakh: round1(rateRevsArcChange / LAKH),
+      arcChangeLakh: roundLakh(rateRevsArcChange / LAKH),
     },
     terminations: {
       count: terminationsCount,
-      arcLostLakh: round1(terminationsArcLost / LAKH),
+      arcLostLakh: roundLakh(terminationsArcLost / LAKH),
+    },
+    probableChurn: {
+      count: probableChurnAccounts.length,
+      arcAtRiskLakh: roundLakh(probableChurnArc / LAKH),
     },
     addedThisMonth,
     addedThisQuarter,
@@ -474,7 +554,7 @@ export async function computeNewBase(
     customersWithoutMeeting,
     earlyUpgrades: {
       count: earlyUpgradesCount,
-      arcAddedLakh: round1(earlyUpgradesArcAdded / LAKH),
+      arcAddedLakh: roundLakh(earlyUpgradesArcAdded / LAKH),
     },
     immediateRateRevisions,
     earlyDowngrades,

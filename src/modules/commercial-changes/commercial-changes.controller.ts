@@ -2,7 +2,7 @@ import type { Response } from 'express';
 import { z } from 'zod';
 import type { CommercialChangeType } from '@prisma/client';
 import { commercialChangesService } from './commercial-changes.service.js';
-import { getCrmClient } from '../../services/integrations/crm/index.js';
+import { DISCONNECTION_REASONS } from './disconnection-reasons.js';
 import type { AuthedRequest } from '../auth/auth.middleware.js';
 
 const bodySchema = z.object({
@@ -23,6 +23,10 @@ const setActivationDateSchema = z.object({
   activationDate: z
     .string()
     .refine((s) => !Number.isNaN(Date.parse(s)), 'Invalid date'),
+});
+
+const retentionDecisionSchema = z.object({
+  decision: z.enum(['RETAIN', 'PROCEED']),
 });
 
 export const commercialChangesController = {
@@ -147,21 +151,44 @@ export const commercialChangesController = {
   },
 
   async disconnectionReasons(_req: AuthedRequest, res: Response) {
-    // CRM unreachability shouldn't 500 the form's initial load — it just
-    // means the disconnection dropdown will be empty. Swallow ECONNREFUSED
-    // / 5xx and return [] so the page renders. The frontend already treats
-    // an empty list as "bridge down".
+    // SAM owns this taxonomy now — see modules/commercial-changes/disconnection-reasons.ts.
+    // Returned with the same shape the form has always consumed, so the
+    // CRM bridge can stay unaware of how the categories are sourced.
+    res.json({ reasons: DISCONNECTION_REASONS });
+  },
+
+  async retentionDecision(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const parse = retentionDecisionSchema.safeParse(req.body);
+    if (!parse.success) {
+      res.status(400).json({ error: parse.error.issues[0]?.message ?? 'Invalid body' });
+      return;
+    }
     try {
-      const reasons = await getCrmClient().fetchDisconnectionReasons();
-      res.json({ reasons });
-    } catch (err) {
-      // Log once at warn level (not the noisy errorHandler stack trace).
-      // eslint-disable-next-line no-console
-      console.warn(
-        '[disconnectionReasons] CRM unreachable — returning empty list:',
-        err instanceof Error ? err.message : err,
+      const change = await commercialChangesService.retentionDecision(
+        req.params.id as string,
+        parse.data.decision,
+        req.user.id,
       );
-      res.json({ reasons: [] });
+      res.json({ change });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Retention decision failed';
+      if (msg === 'Commercial change not found') {
+        res.status(404).json({ error: msg });
+        return;
+      }
+      if (
+        msg.includes('disconnection') ||
+        msg.includes('already been decided') ||
+        msg.includes('21-day')
+      ) {
+        res.status(400).json({ error: msg });
+        return;
+      }
+      throw err;
     }
   },
 

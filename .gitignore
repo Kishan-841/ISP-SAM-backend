@@ -10,3 +10,6 @@ coverage
 .idea/
 .vscode/
 uploads/
+# Vendored skill installations (npx skills add ...) — locally installed,
+# tracked via skills-lock.json instead.
+.agents/

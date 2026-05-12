@@ -9,6 +9,7 @@ import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
 import { integrationsRouter } from './modules/integrations/integrations.routes.js';
 import { meetingsRouter } from './modules/meetings/meetings.routes.js';
 import { notificationsRouter } from './modules/notifications/notifications.routes.js';
+import { probableChurnRouter } from './modules/probable-churn/probable-churn.routes.js';
 import { usersRouter } from './modules/users/users.routes.js';
 
 export const app = express();
@@ -36,6 +37,7 @@ app.use('/audit-logs', auditRouter);
 app.use('/commercial-changes', commercialChangesRouter);
 app.use('/meetings', meetingsRouter);
 app.use('/notifications', notificationsRouter);
+app.use('/probable-churn', probableChurnRouter);
 // Public endpoint — auth is enforced inside the router via HMAC, not JWT.
 app.use('/integrations', integrationsRouter);
 app.use(errorHandler);

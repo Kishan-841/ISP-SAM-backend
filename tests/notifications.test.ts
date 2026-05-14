@@ -49,11 +49,23 @@ beforeEach(async () => {
   setApprovalFileUploaderForTests(new FakeUploader());
 });
 
+beforeEach(() => {
+  // Tests rely on a clean env per case; .env-loaded values would otherwise
+  // leak through and make these flaky depending on local config.
+  delete process.env.ACCOUNTS_NOTIFICATIONS_ENABLED;
+  delete process.env.ACCOUNTS_TEAM_EMAIL;
+  delete process.env.ACCOUNTS_TEAM_CC_EMAILS;
+  delete process.env.SALES_DIRECTOR_EMAIL;
+  delete process.env.ADMIN_NOTIFY_EMAIL;
+});
+
 afterEach(() => {
   setEmailClientForTests(null);
   delete process.env.ACCOUNTS_NOTIFICATIONS_ENABLED;
   delete process.env.ACCOUNTS_TEAM_EMAIL;
   delete process.env.ACCOUNTS_TEAM_CC_EMAILS;
+  delete process.env.SALES_DIRECTOR_EMAIL;
+  delete process.env.ADMIN_NOTIFY_EMAIL;
 });
 
 async function adminCookie() {
@@ -139,7 +151,11 @@ describe('Accounts-team notification bridge', () => {
     expect(sent.subject).toContain('Acme');
     expect(sent.html).toContain('GAZ-0001');
     expect(sent.html).toContain('Upgrade');
-    expect(sent.text).toContain('Old ARC:');
+    // Plain-text body now uses an indented "ARC" block instead of "Old ARC:"
+    // since the template was rewritten to include bandwidth + delta groupings.
+    expect(sent.text).toMatch(/ARC\s*\n\s*Old:/);
+    expect(sent.text).toContain('Bandwidth');
+    expect(sent.text).toContain('SAM Reference:');
 
     const change = await prisma.commercialChange.findUnique({
       where: { id: res.body.commercialChange.id },

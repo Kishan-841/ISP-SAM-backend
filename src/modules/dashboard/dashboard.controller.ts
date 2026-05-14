@@ -5,7 +5,7 @@ import {
   computeNewBase,
   type FyQuarter,
 } from './dashboard.service.js';
-import { computeTeamPerformance } from './team-performance.service.js';
+import { computeSamDetail, computeTeamPerformance } from './team-performance.service.js';
 import { computeAlerts } from './alerts.service.js';
 import { getBucketChanges } from './bucket-changes.service.js';
 import type { AuthedRequest } from '../auth/auth.middleware.js';
@@ -40,6 +40,32 @@ export const dashboardController = {
       return;
     }
     const data = await computeTeamPerformance({ requester: req.user });
+    res.json(data);
+  },
+
+  async samDetail(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    if (req.user.role === 'SAM') {
+      res.status(403).json({ error: 'SAMs cannot view other SAMs' });
+      return;
+    }
+    const samId = req.params.samId;
+    if (typeof samId !== 'string' || samId.length === 0) {
+      res.status(400).json({ error: 'samId required' });
+      return;
+    }
+    const rawQuarter = typeof req.query.quarter === 'string' ? req.query.quarter : '';
+    const quarter: FyQuarter | undefined = (QUARTERS as readonly string[]).includes(rawQuarter)
+      ? (rawQuarter as FyQuarter)
+      : undefined;
+    const data = await computeSamDetail({ samId, quarter, requester: req.user });
+    if (!data) {
+      res.status(404).json({ error: 'SAM not found or not in your team' });
+      return;
+    }
     res.json(data);
   },
 

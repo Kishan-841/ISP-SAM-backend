@@ -20,9 +20,18 @@ POST /api/service-orders
   "disconnectionReason":        "<optional free text>",
   "approvalFileUrl":            "<cloudinary url>",
   "poFileUrl":                  "<cloudinary url>",
+  "mailReceivedDate":           "2026-05-13",            // NEW (2026-05-13) — ISO date
   "notes":                      "SAM-XXXXXXXX | Reason: <category> — <sub> | Details: <reason>"
 }
 ```
+
+> **New field — `mailReceivedDate`** (added 2026-05-13): the date SAM
+> received the customer's approval email. Sent on **every** order type
+> (UPGRADE / DOWNGRADE / RATE_REVISION / DISCONNECTION). ISO date only, no
+> time component. Optional in the API for back-compat, but the SAM form
+> requires it for new commits — expect it to be present on every new
+> service order. Please render it on the CRM order detail UI so the ops
+> team can see when the customer actually consented.
 
 The CRM currently responds:
 
@@ -106,6 +115,85 @@ ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, is_active = EXCLUDED.is_act
 
 - `disconnectionCategoryId` must exist in `disconnection_categories` and have `is_active = true`.
 - `disconnectionSubCategoryId` must exist in `disconnection_sub_categories`, have `is_active = true`, **and** `category_id` must equal the supplied `disconnectionCategoryId`. SAM enforces the parent–child match client-side; CRM should double-check.
+
+### Workflow stages — two-track approval (delivery + sales director)
+
+**The current stages** the SAM team sees on returned service orders are:
+
+```
+PENDING_APPROVAL  (admin approval — single approval gate)
+  → PENDING_DOCS_REVIEW
+  → PENDING_NOC
+  → PENDING_SAM_ACTIVATION
+  → PENDING_ACCOUNTS
+  → COMPLETED
+```
+
+**The new stages we want** depend on `orderType`. Sales Director approves every service order; Delivery Login also approves Upgrade/Downgrade (provisioning-impacting changes):
+
+```
+UPGRADE / DOWNGRADE
+  DELIVERY_APPROVAL
+    → SALES_DIRECTOR_APPROVAL
+    → DOCS
+    → NOC
+    → ACCOUNTS
+    → COMPLETED
+
+RATE_REVISION / DISCONNECTION
+  SALES_DIRECTOR_APPROVAL
+    → DOCS
+    → NOC
+    → ACCOUNTS
+    → COMPLETED
+```
+
+Rules:
+- **`SALES_DIRECTOR_APPROVAL` is mandatory on every order type.** A service order cannot reach `DOCS` without it.
+- **`DELIVERY_APPROVAL` is the entry stage for `UPGRADE` and `DOWNGRADE` only.** For rate revisions and disconnections, the order starts directly in `SALES_DIRECTOR_APPROVAL`.
+- Either approver rejecting moves the order to a terminal `REJECTED` (or `DELIVERY_REJECTED` / `SALES_DIRECTOR_REJECTED` if you want the granularity — SAM will display either).
+- The order moves forward only when the current approver approves; it can't skip a stage.
+
+Changes the CRM team needs to make:
+
+1. Replace the single `PENDING_APPROVAL` gate with **two new approval stages**:
+   - `DELIVERY_APPROVAL` — actioned by users with a new **Delivery** role/permission.
+   - `SALES_DIRECTOR_APPROVAL` — actioned by users with a **Sales Director** role/permission.
+2. New approval routing on `POST /api/service-orders`:
+   - `orderType IN ('UPGRADE', 'DOWNGRADE')` → initial `status = DELIVERY_APPROVAL`.
+   - `orderType IN ('RATE_REVISION', 'DISCONNECTION')` → initial `status = SALES_DIRECTOR_APPROVAL`.
+3. Wire two approval endpoints (or two actions on a single endpoint — your call):
+   - When Delivery approves an Upgrade/Downgrade → move to `SALES_DIRECTOR_APPROVAL`.
+   - When Sales Director approves → move to `DOCS`.
+4. Rename `PENDING_DOCS_REVIEW` → **`DOCS`**.
+5. Rename `PENDING_NOC` → **`NOC`**.
+6. **Drop** the `PENDING_SAM_ACTIVATION` stage entirely. SAM no longer participates in setting an activation date on the order — the contractual notice period is enforced SAM-side via `scheduled_termination_at`, and account state is mirrored from `COMPLETED` only.
+7. Rename `PENDING_ACCOUNTS` → **`ACCOUNTS`**.
+8. Keep `COMPLETED`, `DOCS_REJECTED`, `REJECTED`, `CANCELLED` as terminal states (no change).
+9. Return the new string values verbatim in the `status` field of:
+   - `POST /api/service-orders` (creation response — must reflect the routed initial state per rule 2).
+   - `GET /api/service-orders?customerId=…` (list).
+   - `POST /api/service-orders/:id/set-activation-date` — **endpoint no longer used by SAM**; safe to deprecate.
+
+SAM is already forward-compatible: the CRM-status pill maps the new state names (`DELIVERY_APPROVAL`, `SALES_DIRECTOR_APPROVAL`, `DOCS`, `NOC`, `ACCOUNTS`, `COMPLETED`) to amber-pending / emerald-completed / red-rejected pills. Legacy state names are kept in the mapping too, so any pre-rename data continues to render correctly.
+
+### Confirming both dates are forwarded
+
+SAM sends two date fields on every service-order POST:
+
+| Field | Source | Format | Notes |
+|---|---|---|---|
+| `effectiveDate` | SAM form — when the change goes live | ISO 8601 datetime | Already supported on your side. |
+| `mailReceivedDate` | SAM form — date SAM received the customer's approval email | ISO date (`YYYY-MM-DD`) | Added 2026-05-13. Sent on every order type (UPGRADE / DOWNGRADE / RATE_REVISION / DISCONNECTION). Please render it in the CRM order detail UI alongside Effective Date. |
+
+If your `service_orders` table doesn't have a `mail_received_date` column yet, please add one:
+
+```sql
+ALTER TABLE service_orders
+  ADD COLUMN IF NOT EXISTS mail_received_date DATE;
+```
+
+Then store the incoming `mailReceivedDate` value and surface it on whichever screen shows order details (alongside the existing Effective Date row).
 
 ### Existing CRM-side endpoint to keep working
 

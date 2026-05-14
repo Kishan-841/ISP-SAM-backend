@@ -7,6 +7,7 @@ export type Requester = { id: string; role: UserRole };
 export type BucketChangeRow = {
   id: string;
   effectiveDate: string;
+  mailReceivedDate: string | null;
   customer: {
     id: string;
     clientName: string;
@@ -14,6 +15,8 @@ export type BucketChangeRow = {
     customerCode: string | null;
     circuitId: string | null;
     kittyType: KittyType;
+    /** null = Excel-imported / not CRM-synced — UI hides CRM-only details. */
+    externalCrmId: string | null;
   };
   samOwner: { id: string; name: string; email: string } | null;
   changeType: CommercialChangeType;
@@ -76,6 +79,7 @@ export async function getBucketChanges(opts: {
           customerCode: true,
           circuitId: true,
           kittyType: true,
+          externalCrmId: true,
           samOwner: { select: { id: true, name: true, email: true } },
         },
       },
@@ -89,6 +93,7 @@ export async function getBucketChanges(opts: {
     return {
       id: r.id,
       effectiveDate: r.effectiveDate.toISOString(),
+      mailReceivedDate: r.mailReceivedDate?.toISOString() ?? null,
       customer: {
         id: r.account.id,
         clientName: r.account.clientName,
@@ -96,6 +101,7 @@ export async function getBucketChanges(opts: {
         customerCode: r.account.customerCode,
         circuitId: r.account.circuitId,
         kittyType: r.account.kittyType,
+        externalCrmId: r.account.externalCrmId,
       },
       samOwner: r.account.samOwner
         ? {

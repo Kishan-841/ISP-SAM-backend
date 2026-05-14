@@ -191,13 +191,16 @@ describe('POST /commercial-changes/:id/retention-decision', () => {
     const change = await prisma.commercialChange.findUnique({
       where: { id: commit.body.commercialChange.id },
     });
-    // scheduledTerminationAt = retentionDecidedAt + 10d. Today is the decision day.
+    // scheduledTerminationAt = start-of-day(retentionDecidedAt) + 10d. Compare
+    // dates directly to side-step the timestamp/date drift across timezones.
     expect(change?.scheduledTerminationAt).not.toBeNull();
-    const days = Math.round(
-      ((change!.scheduledTerminationAt!.getTime() - change!.retentionDecidedAt!.getTime()) /
-        86_400_000),
+    const decided = change!.retentionDecidedAt!;
+    const expected = new Date(
+      Date.UTC(decided.getUTCFullYear(), decided.getUTCMonth(), decided.getUTCDate() + 10),
     );
-    expect(days).toBe(10);
+    expect(change!.scheduledTerminationAt!.toISOString().slice(0, 10)).toBe(
+      expected.toISOString().slice(0, 10),
+    );
   });
 
   it('PROCEED on CRM-synced account raises a CRM service order', async () => {

@@ -1,4 +1,5 @@
 import { NetcoreEmailClient } from './netcore-email-client.js';
+import { ResendEmailClient } from './resend-email-client.js';
 
 /**
  * Email transport abstraction.
@@ -90,12 +91,26 @@ export function getEmailClient(): EmailClient {
 }
 
 function buildClientFromEnv(): EmailClient {
-  const apiKey = process.env.NETCORE_API_KEY;
-  const fromEmail = process.env.NETCORE_FROM_EMAIL;
-  if (apiKey && fromEmail) {
+  // Prefer Resend when its API key is set — that's the active transport for
+  // production today. Accept either RESEND_API_KEY (canonical) or the
+  // lowercase resend_api_key (some shells / dotenv loaders preserve case).
+  const resendKey = process.env.RESEND_API_KEY ?? process.env.resend_api_key;
+  if (resendKey) {
+    return new ResendEmailClient({
+      apiKey: resendKey,
+      fromEmail: process.env.RESEND_FROM_EMAIL ?? 'onboarding@resend.dev',
+      fromName: process.env.RESEND_FROM_NAME ?? 'Gazon SAM',
+      replyTo: process.env.RESEND_REPLY_TO,
+    });
+  }
+  // Legacy Netcore transport — kept as a fallback in case anyone still has
+  // those creds set on a deployed env.
+  const netcoreKey = process.env.NETCORE_API_KEY;
+  const netcoreFrom = process.env.NETCORE_FROM_EMAIL;
+  if (netcoreKey && netcoreFrom) {
     return new NetcoreEmailClient({
-      apiKey,
-      fromEmail,
+      apiKey: netcoreKey,
+      fromEmail: netcoreFrom,
       fromName: process.env.NETCORE_FROM_NAME ?? 'Gazon SAM',
       replyTo: process.env.NETCORE_REPLY_TO,
     });

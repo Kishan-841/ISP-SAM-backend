@@ -23,6 +23,8 @@ export interface CreateServiceOrderInput {
   newArc?: number;
   /** ISO 8601. Optional. Not used for DISCONNECTION (CRM auto +30 days). */
   effectiveDate?: string;
+  /** Date SAM received the customer's approval email (ISO date, no time). */
+  mailReceivedDate?: string;
   notes?: string;
   /**
    * HTTPS URL to the customer-approval file in Cloudinary. Optional today

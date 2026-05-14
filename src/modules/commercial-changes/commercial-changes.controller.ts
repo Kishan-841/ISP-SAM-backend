@@ -11,6 +11,10 @@ const bodySchema = z.object({
   newArc: z.coerce.number().nonnegative(),
   newBandwidthMbps: z.coerce.number().int().nonnegative().optional(),
   effectiveDate: z.string().refine((s) => !Number.isNaN(Date.parse(s)), 'Invalid date'),
+  mailReceivedDate: z
+    .string()
+    .refine((s) => !Number.isNaN(Date.parse(s)), 'Invalid mail-received date')
+    .optional(),
   reason: z.string().optional(),
   // Disconnection-only — required server-side when changeType=DISCONNECTION.
   disconnectionCategoryId: z.string().optional(),
@@ -45,7 +49,17 @@ export const commercialChangesController = {
     const poFile = files?.poFile?.[0];
     // At least ONE of approval / PO must be uploaded. Both is still better
     // (compliance), but a single doc is acceptable to unblock the workflow.
-    if (!approvalFile && !poFile) {
+    //
+    // Test-mode bypass: two gates must align for the doc requirement to be
+    // skipped — SAM_TEST_MODE=true on the backend (allows the feature) AND
+    // the form's runtime toggle sent `testMode=true` on this request.
+    // Production must NEVER set the env flag. The audit log payload stamps
+    // `testMode: true` on every bypassed commit so it's forensically clear.
+    const testModeAllowed = process.env.SAM_TEST_MODE === 'true';
+    const testModeRequested =
+      req.body?.testMode === 'true' || req.body?.testMode === true;
+    const bypassDocs = testModeAllowed && testModeRequested;
+    if (!approvalFile && !poFile && !bypassDocs) {
       res.status(422).json({
         error: 'Attach at least one document — client approval or PO.',
       });
@@ -75,6 +89,9 @@ export const commercialChangesController = {
         newArc: parse.data.newArc,
         newBandwidthMbps: parse.data.newBandwidthMbps ?? null,
         effectiveDate: new Date(parse.data.effectiveDate),
+        mailReceivedDate: parse.data.mailReceivedDate
+          ? new Date(parse.data.mailReceivedDate)
+          : null,
         reason: parse.data.reason ?? null,
         approvalFile: approvalFile
           ? {
@@ -93,11 +110,22 @@ export const commercialChangesController = {
         disconnectionSubCategoryId: parse.data.disconnectionSubCategoryId,
         disconnectionReason: parse.data.disconnectionReason,
         notes: parse.data.notes,
+        testMode: bypassDocs,
       });
       res.status(201).json(result);
     } catch (err) {
       if (err instanceof Error && err.message === 'Account not found') {
         res.status(404).json({ error: err.message });
+        return;
+      }
+      // Lifecycle-guard messages from the service surface as 422 so the form
+      // can render the message verbatim. The prefix is a stable code the UI
+      // can match on if it ever needs to branch on type.
+      if (
+        err instanceof Error &&
+        /^(ACCOUNT_TERMINATED|ACCOUNT_DISCONNECTING|DISCONNECTION_IN_FLIGHT):/.test(err.message)
+      ) {
+        res.status(422).json({ error: err.message });
         return;
       }
       throw err;

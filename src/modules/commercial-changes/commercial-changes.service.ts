@@ -24,6 +24,9 @@ export type CommitInput = {
   newArc: number;
   newBandwidthMbps: number | null;
   effectiveDate: Date;
+  /** Date SAM received the customer's email approving the change. Optional
+   *  at the API layer (legacy rows have none); the form enforces required. */
+  mailReceivedDate: Date | null;
   reason: string | null;
   /**
    * Approval and PO are EACH optional, but at least one must be provided.
@@ -38,6 +41,10 @@ export type CommitInput = {
   disconnectionReason?: string;
   /** Optional notes forwarded to CRM as `notes` on the service-order request. */
   notes?: string;
+  /** When true (and SAM_TEST_MODE permits), the doc-attachment requirement is
+   *  skipped and the audit log stamps `testMode: true`. The controller
+   *  validates the env-permission gate before passing this through. */
+  testMode?: boolean;
 };
 
 export type CommitResult = {
@@ -48,6 +55,7 @@ export type CommitResult = {
     oldArc: number;
     newArc: number;
     effectiveDate: string;
+    mailReceivedDate: string | null;
     approvalFileUrl: string | null;
     approvalFilePublicId: string | null;
     poFileUrl: string | null;
@@ -88,6 +96,28 @@ export const commercialChangesService = {
       throw new Error('Account not found');
     }
 
+    // Lifecycle guard — closed/closing accounts must not accept further
+    // commercial changes, otherwise SAM and CRM drift. The controller maps
+    // each error to 422 with the message verbatim so the form can surface it.
+    if (account.contractStatus === 'TERMINATED') {
+      throw new Error(
+        'ACCOUNT_TERMINATED: This customer has been disconnected. No further commercial changes can be raised.',
+      );
+    }
+    if (account.contractStatus === 'DISCONNECTING') {
+      throw new Error(
+        'ACCOUNT_DISCONNECTING: This customer is in the 10-day disconnection notice. Wait for termination or escalate to SAM_HEAD/ADMIN.',
+      );
+    }
+    if (
+      account.contractStatus === 'PROBABLE_CHURN' &&
+      input.changeType === 'DISCONNECTION'
+    ) {
+      throw new Error(
+        'DISCONNECTION_IN_FLIGHT: A disconnection is already in the 21-day retention window. Either retain via a rate revision or wait for the day-21 prompt.',
+      );
+    }
+
     const performingUser = await prisma.user.findUnique({
       where: { id: input.performedByUserId },
     });
@@ -101,9 +131,11 @@ export const commercialChangesService = {
     // from a failed transaction are cheap; orphan DB rows confuse audit.)
     const commercialChangeId = crypto.randomUUID();
 
-    if (!input.approvalFile && !input.poFile) {
+    if (!input.approvalFile && !input.poFile && !input.testMode) {
       // Defensive — controller already gates this, but a service-level
       // guard keeps the rule honest if commit() is called from elsewhere.
+      // The testMode flag is passed by the controller only when both the
+      // env permits and the request asked for it.
       throw new Error('At least one of approvalFile or poFile is required');
     }
 
@@ -158,6 +190,7 @@ export const commercialChangesService = {
           reason: input.reason,
           oldBandwidthMbps: oldBandwidth,
           newBandwidthMbps: input.newBandwidthMbps,
+          mailReceivedDate: input.mailReceivedDate,
           disconnectionCategoryId: input.disconnectionCategoryId ?? null,
           disconnectionSubCategoryId: input.disconnectionSubCategoryId ?? null,
           disconnectionReason: input.disconnectionReason ?? null,
@@ -180,6 +213,9 @@ export const commercialChangesService = {
             approvalFilePublicId: approvalUpload?.publicId ?? null,
             poFileUrl: poUpload?.secureUrl ?? null,
             poFilePublicId: poUpload?.publicId ?? null,
+            ...(input.testMode && !input.approvalFile && !input.poFile
+              ? { testMode: true }
+              : {}),
           },
         },
       });
@@ -275,10 +311,14 @@ export const commercialChangesService = {
       changeType: input.changeType,
       oldArc,
       newArc: input.newArc,
+      oldBandwidthMbps: oldBandwidth,
+      newBandwidthMbps: input.newBandwidthMbps,
       effectiveDate: input.effectiveDate,
+      mailReceivedDate: input.mailReceivedDate,
       samOwnerName: performingUser.name,
       reason: input.reason,
       performedByUserId: input.performedByUserId,
+      testMode: input.testMode,
     });
 
     return {
@@ -289,6 +329,7 @@ export const commercialChangesService = {
         oldArc: Number(result.oldArc),
         newArc: Number(result.newArc),
         effectiveDate: result.effectiveDate.toISOString(),
+        mailReceivedDate: result.mailReceivedDate?.toISOString() ?? null,
         approvalFileUrl: approvalUpload?.secureUrl ?? null,
         approvalFilePublicId: approvalUpload?.publicId ?? null,
         poFileUrl: poUpload?.secureUrl ?? null,
@@ -320,6 +361,9 @@ export const commercialChangesService = {
             customerCode: true,
             circuitId: true,
             kittyType: true,
+            // externalCrmId — null = Excel-imported (no CRM bridge), so the
+            // UI can render "Local-only" instead of misleading CRM cells.
+            externalCrmId: true,
           },
         },
       },
@@ -549,6 +593,8 @@ export const commercialChangesService = {
           disconnectionReason: change.disconnectionReason ?? undefined,
           approvalFileUrl: change.approvalFileUrl ?? undefined,
           poFileUrl: change.poFileUrl ?? undefined,
+          mailReceivedDate:
+            change.mailReceivedDate?.toISOString().slice(0, 10) ?? undefined,
           notes: noteParts.join(' | '),
         });
         crmServiceOrderId = order.id;
@@ -775,6 +821,11 @@ function buildServiceOrderInput(
   // actually present, so the CRM doesn't get bogus empty-string URLs.
   if (approvalFileUrl) base.approvalFileUrl = approvalFileUrl;
   if (poFileUrl) base.poFileUrl = poFileUrl;
+  // Mail-received date — date SAM got the customer's approval email. Passed
+  // through so CRM can render it on their side. ISO date only, no time.
+  if (input.mailReceivedDate) {
+    base.mailReceivedDate = input.mailReceivedDate.toISOString().slice(0, 10);
+  }
   // Always prefix CRM notes with our internal SAM-XXXXXXXX reference so
   // support tickets that span the boundary are trivially traceable. The
   // CRM team explicitly asked for this in their contract notes.

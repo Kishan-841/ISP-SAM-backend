@@ -107,10 +107,14 @@ export async function sendCommercialChangeAlert(input: {
   changeType: CommercialChangeType;
   oldArc: number;
   newArc: number;
+  oldBandwidthMbps: number | null;
+  newBandwidthMbps: number | null;
   effectiveDate: Date;
+  mailReceivedDate: Date | null;
   samOwnerName: string;
   reason: string | null;
   performedByUserId: string;
+  testMode?: boolean;
 }): Promise<{ status: AuditOutcome }> {
   const audit = {
     entityType: 'CommercialChange',
@@ -123,18 +127,45 @@ export async function sendCommercialChangeAlert(input: {
     await writeAudit(audit, 'SKIPPED', `${ENABLED_KEY} is not true`);
     return { status: 'SKIPPED' };
   }
-  const to = process.env.ACCOUNTS_TEAM_EMAIL;
+
+  // Primary recipient is the Sales Director (the approver). The previously-
+  // used ACCOUNTS_TEAM_EMAIL stays as a fallback for envs that haven't been
+  // migrated yet. At least one of the two must be set.
+  const salesDirector = process.env.SALES_DIRECTOR_EMAIL;
+  const accountsTeam = process.env.ACCOUNTS_TEAM_EMAIL;
+  const to = salesDirector ?? accountsTeam;
   if (!to) {
-    await writeAudit(audit, 'MISCONFIGURED', 'ACCOUNTS_TEAM_EMAIL env var is not set');
+    await writeAudit(
+      audit,
+      'MISCONFIGURED',
+      'Neither SALES_DIRECTOR_EMAIL nor ACCOUNTS_TEAM_EMAIL env var is set',
+    );
     return { status: 'MISCONFIGURED' };
   }
 
-  // CC the SAM_HEAD that owns this account's SAM, plus any global CC list.
+  // CC the admin reviewers + the SAM_HEAD that owns this account, plus any
+  // additional ACCOUNTS_TEAM_CC_EMAILS list. dedupe so the same address
+  // never appears in both To and CC (or twice in CC).
   const samHeadEmail = await resolveSamHeadEmail(input.account.samOwnerId);
+  const adminCc = process.env.ADMIN_NOTIFY_EMAIL;
   const envCc = parseEmailList(process.env.ACCOUNTS_TEAM_CC_EMAILS) ?? [];
-  const cc = Array.from(new Set([...envCc, ...(samHeadEmail ? [samHeadEmail] : [])]));
+  // If SALES_DIRECTOR is the To, fold the legacy ACCOUNTS_TEAM_EMAIL into CC
+  // so it keeps receiving the alert.
+  const accountsCc =
+    salesDirector && accountsTeam && accountsTeam !== salesDirector ? [accountsTeam] : [];
+  const cc = Array.from(
+    new Set(
+      [
+        ...envCc,
+        ...accountsCc,
+        ...(adminCc ? [adminCc] : []),
+        ...(samHeadEmail ? [samHeadEmail] : []),
+      ].filter((addr) => addr !== to),
+    ),
+  );
 
-  const { subject, html, text } = buildCommercialChangeAlertEmail(input);
+  const samRef = `SAM-${input.commercialChangeId.slice(0, 8).toUpperCase()}`;
+  const { subject, html, text } = buildCommercialChangeAlertEmail({ ...input, samRef });
   const result = await dispatch({
     message: {
       to,

@@ -12,4 +12,9 @@ dashboardRouter.get(
   requireRole('ADMIN', 'SAM_HEAD'),
   dashboardController.teamPerformance,
 );
+dashboardRouter.get(
+  '/team-performance/:samId',
+  requireRole('ADMIN', 'SAM_HEAD'),
+  dashboardController.samDetail,
+);
 dashboardRouter.get('/alerts', dashboardController.alerts);

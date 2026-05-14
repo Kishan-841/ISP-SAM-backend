@@ -278,6 +278,100 @@ describe('POST /commercial-changes', () => {
   });
 });
 
+describe('POST /commercial-changes — lifecycle guards', () => {
+  it('422 ACCOUNT_TERMINATED when raising any change on a terminated customer', async () => {
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'GoneCo',
+      currentArc: 0,
+      contractStatus: 'TERMINATED',
+      externalCrmId: null,
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'UPGRADE')
+      .field('newArc', '720000')
+      .field('effectiveDate', '2026-05-01')
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf')
+      .attach('poFile', PDF_BUFFER, 'po.pdf');
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/^ACCOUNT_TERMINATED:/);
+    expect(res.body.error).toMatch(/disconnected/i);
+  });
+
+  it('422 ACCOUNT_DISCONNECTING when raising any change on an account in the 10-day notice', async () => {
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'NoticeCo',
+      currentArc: 600000,
+      contractStatus: 'DISCONNECTING',
+      externalCrmId: null,
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'RATE_REVISION')
+      .field('newArc', '600000')
+      .field('newBandwidthMbps', '200')
+      .field('effectiveDate', '2026-05-01')
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf')
+      .attach('poFile', PDF_BUFFER, 'po.pdf');
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/^ACCOUNT_DISCONNECTING:/);
+    expect(res.body.error).toMatch(/notice/i);
+  });
+
+  it('422 DISCONNECTION_IN_FLIGHT when raising a second disconnection on a PROBABLE_CHURN account', async () => {
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'PendingCo',
+      currentArc: 600000,
+      contractStatus: 'PROBABLE_CHURN',
+      externalCrmId: null,
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'DISCONNECTION')
+      .field('newArc', '0')
+      .field('effectiveDate', '2026-05-01')
+      .field('disconnectionCategoryId', 'commercial-issue')
+      .field('disconnectionSubCategoryId', 'shifted-to-broadband')
+      .attach('approvalFile', PDF_BUFFER, 'disco.pdf')
+      .attach('poFile', PDF_BUFFER, 'po.pdf');
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/^DISCONNECTION_IN_FLIGHT:/);
+    expect(res.body.error).toMatch(/retain/i);
+  });
+
+  it('Rate revision / upgrade / downgrade on PROBABLE_CHURN still works — that path auto-retains', async () => {
+    // Counterpoint: PROBABLE_CHURN must NOT block retention plays.
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'StayingCo',
+      currentArc: 600000,
+      bandwidthMbps: 100,
+      contractStatus: 'PROBABLE_CHURN',
+      externalCrmId: null,
+    });
+    const res = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'RATE_REVISION')
+      .field('newArc', '600000')
+      .field('newBandwidthMbps', '200')
+      .field('effectiveDate', '2026-05-01')
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf')
+      .attach('poFile', PDF_BUFFER, 'po.pdf');
+    expect(res.status).toBe(201);
+  });
+});
+
 describe('Account update on CRM COMPLETED', () => {
   beforeEach(async () => {
     const mod = await import('../src/services/integrations/crm/index.js');
@@ -530,6 +624,7 @@ describe('CRM service-order bridge', () => {
       .field('newArc', '720000')
       .field('newBandwidthMbps', '200')
       .field('effectiveDate', '2026-05-01')
+      .field('mailReceivedDate', '2026-04-25')
       .attach('approvalFile', PDF_BUFFER, 'approval.pdf').attach('poFile', PDF_BUFFER, 'po.pdf');
     expect(res.status).toBe(201);
 
@@ -540,9 +635,14 @@ describe('CRM service-order bridge', () => {
     expect(call.orderType).toBe('UPGRADE');
     expect(call.newArc).toBe(720000);
     expect(call.newBandwidth).toBe(200);
+    // Mail-received date is forwarded so CRM can render when the customer
+    // actually consented. ISO date only, no time.
+    expect(call.mailReceivedDate).toBe('2026-04-25');
     // SAM internal ticket id is round-tripped via the notes field for
     // cross-system traceability.
     expect(call.notes).toMatch(/^SAM-[A-F0-9]{8}$/);
+    // Persisted on the SAM row too.
+    expect(res.body.commercialChange.mailReceivedDate).toContain('2026-04-25');
 
     // SAM row stores the CRM linkage
     expect(res.body.crm.ok).toBe(true);

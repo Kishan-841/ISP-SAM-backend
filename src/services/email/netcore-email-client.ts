@@ -23,6 +23,10 @@ type NetcoreSendResponse = {
   message?: string;
   data?: { message_id?: string };
   errors?: Array<{ message?: string; code?: number }>;
+  // Netcore returns single-error responses (e.g. IP-not-whitelisted) under
+  // this singular field, not the `errors` array — surface it so the reason
+  // lands in the audit log instead of a naked "HTTP 403".
+  error?: string;
 };
 
 export class NetcoreEmailClient implements EmailClient {
@@ -99,6 +103,7 @@ export class NetcoreEmailClient implements EmailClient {
       const detail =
         body.errors?.map((e) => e.message).filter(Boolean).join('; ') ||
         body.message ||
+        body.error ||
         `HTTP ${res.status}`;
       return { ok: false, error: `Netcore rejected: ${detail}` };
     }

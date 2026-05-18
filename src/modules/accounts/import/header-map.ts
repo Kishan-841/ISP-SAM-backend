@@ -13,6 +13,7 @@ export type CanonicalRow = {
   clientName?: string;
   companyName?: string;
   mobileNumber?: string;
+  email?: string;
   /** Annual ₹ — what the platform stores after this refactor. */
   currentArc?: number;
   contractStatus?: string;
@@ -52,6 +53,13 @@ export const HEADER_SYNONYMS: Record<string, ParsedRowKey> = {
   contact: 'mobileNumber',
   contactnumber: 'mobileNumber',
   phonenumber: 'mobileNumber',
+
+  // email — populated onto accounts.email so MOM-to-customer can use it.
+  email: 'email',
+  emailaddress: 'email',
+  emailid: 'email',
+  customeremail: 'email',
+  contactemail: 'email',
 
   // currentArc (annualised) — canonical
   arc: 'currentArc',

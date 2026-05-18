@@ -156,6 +156,43 @@ describe('POST /integrations/crm/customer-activated', () => {
     });
   });
 
+  describe('failure capture', () => {
+    it('records a human-readable status_reason when circuit_id collides', async () => {
+      // First customer claims a circuit ID.
+      const first = samplePayload({ externalId: 'lead-first' });
+      first.customer.circuitId = 'CKT-COLLIDE';
+      first.customer.companyName = 'First Tenant Ltd';
+      const firstRes = await postWebhook(first);
+      expect(firstRes.status).toBe(201);
+
+      // Second customer (different externalId) tries to use the same circuit.
+      const second = samplePayload({ externalId: 'lead-second' });
+      second.customer.circuitId = 'CKT-COLLIDE';
+      const secondRes = await postWebhook(second);
+      // Re-thrown so the CRM gets a 5xx and can decide whether to retry.
+      expect(secondRes.status).toBeGreaterThanOrEqual(500);
+
+      const events = await prisma.integrationEvent.findMany({
+        where: { externalEventId: second.eventId },
+      });
+      expect(events).toHaveLength(1);
+      const evt = events[0]!;
+      expect(evt.status).toBe('FAILED');
+      // Reason should pinpoint the conflict and name the existing owner so
+      // an admin can fix it from the audit row alone.
+      expect(evt.statusReason).toMatch(/circuit_id/i);
+      expect(evt.statusReason).toMatch(/CKT-COLLIDE/);
+      expect(evt.statusReason).toMatch(/First Tenant Ltd/);
+
+      // No second account row should have been created.
+      const accounts = await prisma.account.findMany({
+        where: { circuitId: 'CKT-COLLIDE' },
+      });
+      expect(accounts).toHaveLength(1);
+      expect(accounts[0]!.externalCrmId).toBe('lead-first');
+    });
+  });
+
   describe('idempotency', () => {
     it('returns 200 already_processed on duplicate eventId, no second Account', async () => {
       const payload = samplePayload();

@@ -69,6 +69,8 @@ export const integrationsService = {
     ctx: IngestContext,
   ): Promise<IngestResult> {
     // 1. Reserve the eventId in IntegrationEvent. Race-safe via @unique.
+    //    Initial status='FAILED' is a placeholder — overwritten to PROCESSED
+    //    on success, or kept FAILED with a populated statusReason on error.
     let event;
     try {
       event = await prisma.integrationEvent.create({
@@ -77,7 +79,7 @@ export const integrationsService = {
           eventType: payload.eventType,
           externalEventId: payload.eventId,
           occurredAt: new Date(payload.occurredAt),
-          status: 'FAILED', // updated on success below
+          status: 'FAILED',
           payload: payload as unknown as Prisma.InputJsonValue,
           signatureHeader: ctx.signatureHeader,
           timestampHeader: ctx.timestampHeader,
@@ -102,43 +104,53 @@ export const integrationsService = {
       throw err;
     }
 
-    // 2. Upsert the Account.
+    // 2. Upsert the Account. Wrap so any failure (unique-constraint, schema
+    //    drift, etc.) is captured into status_reason — otherwise the row
+    //    stays FAILED with no clue why and the admin /integrations page is
+    //    silent about the actual cause.
     const c = payload.customer;
     const currentArc = resolveCurrentArc(c);
-    const account = await prisma.account.upsert({
-      where: { externalCrmId: c.externalId },
-      create: {
-        clientName: c.contactName?.trim() || c.companyName,
-        companyName: c.companyName,
-        kittyType: 'NEW',
-        contractStatus: 'ACTIVE',
-        currentArc: new Prisma.Decimal(currentArc),
-        // Snapshot the activation-time ARC so dashboards can show the
-        // "since onboarding" delta. Set ONCE on create — never overwritten
-        // on subsequent webhook replays.
-        startOfPeriodArc: new Prisma.Decimal(currentArc),
-        onboardingDate: new Date(c.onboardingDate),
-        externalCrmId: c.externalId,
-        email: c.email ?? null,
-        mobileNumber: c.phone ?? null,
-        currentPlan: c.currentPlan ?? null,
-        circuitId: c.circuitId ?? null,
-        bandwidthMbps: c.bandwidthMbps ?? null,
-      },
-      update: {
-        companyName: c.companyName,
-        clientName: c.contactName?.trim() || c.companyName,
-        currentArc: new Prisma.Decimal(currentArc),
-        // NB: startOfPeriodArc intentionally absent — never overwrite the
-        // original snapshot. Backfill happens via the SQL fixup migration.
-        email: c.email ?? null,
-        mobileNumber: c.phone ?? null,
-        currentPlan: c.currentPlan ?? null,
-        circuitId: c.circuitId ?? null,
-        bandwidthMbps: c.bandwidthMbps ?? null,
-      },
-      select: { id: true },
-    });
+    let account: { id: string };
+    try {
+      account = await prisma.account.upsert({
+        where: { externalCrmId: c.externalId },
+        create: {
+          clientName: c.contactName?.trim() || c.companyName,
+          companyName: c.companyName,
+          kittyType: 'NEW',
+          contractStatus: 'ACTIVE',
+          currentArc: new Prisma.Decimal(currentArc),
+          // Snapshot the activation-time ARC so dashboards can show the
+          // "since onboarding" delta. Set ONCE on create — never overwritten
+          // on subsequent webhook replays.
+          startOfPeriodArc: new Prisma.Decimal(currentArc),
+          onboardingDate: new Date(c.onboardingDate),
+          externalCrmId: c.externalId,
+          email: c.email ?? null,
+          mobileNumber: c.phone ?? null,
+          currentPlan: c.currentPlan ?? null,
+          circuitId: c.circuitId ?? null,
+          bandwidthMbps: c.bandwidthMbps ?? null,
+        },
+        update: {
+          companyName: c.companyName,
+          clientName: c.contactName?.trim() || c.companyName,
+          currentArc: new Prisma.Decimal(currentArc),
+          // NB: startOfPeriodArc intentionally absent — never overwrite the
+          // original snapshot. Backfill happens via the SQL fixup migration.
+          email: c.email ?? null,
+          mobileNumber: c.phone ?? null,
+          currentPlan: c.currentPlan ?? null,
+          circuitId: c.circuitId ?? null,
+          bandwidthMbps: c.bandwidthMbps ?? null,
+        },
+        select: { id: true },
+      });
+    } catch (err) {
+      const reason = await describeIngestError(err, c);
+      await safeUpdateStatusReason(event.id, reason);
+      throw err;
+    }
 
     // 3. Mark the event processed and link the account.
     await prisma.integrationEvent.update({
@@ -147,26 +159,33 @@ export const integrationsService = {
     });
 
     // 4. Best-effort: notify all SAM_HEADs that a new customer is in their
-    //    triage queue. Audit-logged whether or not transport actually fires.
-    //    Re-fetch with the fields the template needs (currentArc, bandwidth).
-    const accountForEmail = await prisma.account.findUnique({
-      where: { id: account.id },
-      select: {
-        id: true,
-        clientName: true,
-        companyName: true,
-        customerCode: true,
-        circuitId: true,
-        currentArc: true,
-        bandwidthMbps: true,
-      },
-    });
-    if (accountForEmail) {
-      await sendCustomerActivatedAlert({
-        accountId: accountForEmail.id,
-        account: accountForEmail,
-        systemUserId: SYSTEM_USER_ID,
+    //    triage queue. Wrap the whole thing — the ingest is already PROCESSED
+    //    by this point and we don't want a stray email-orchestrator failure
+    //    to flip the row back or 5xx the CRM (which would trigger pointless
+    //    retries of an already-applied event).
+    try {
+      const accountForEmail = await prisma.account.findUnique({
+        where: { id: account.id },
+        select: {
+          id: true,
+          clientName: true,
+          companyName: true,
+          customerCode: true,
+          circuitId: true,
+          currentArc: true,
+          bandwidthMbps: true,
+        },
       });
+      if (accountForEmail) {
+        await sendCustomerActivatedAlert({
+          accountId: accountForEmail.id,
+          account: accountForEmail,
+          systemUserId: SYSTEM_USER_ID,
+        });
+      }
+    } catch {
+      // Swallowed deliberately — failure surfaces in audit_logs via the
+      // orchestrator's own SENT/FAILED/MISCONFIGURED outcome row.
     }
 
     return { status: 'PROCESSED', accountId: account.id, eventId: event.id };
@@ -222,6 +241,15 @@ export const integrationsService = {
   },
 
   /**
+   * Best-effort writer used by error paths after an IntegrationEvent row
+   * has been created. Exposed so the controller can attach a reason for
+   * unexpected exceptions that escape `ingestCustomerActivated`.
+   */
+  async setStatusReason(eventId: string, reason: string) {
+    await safeUpdateStatusReason(eventId, reason);
+  },
+
+  /**
    * Record a webhook that we refused to process (bad signature, validation
    * failure, etc). Best-effort — failures here are swallowed so they don't
    * mask the original 4xx/5xx the caller is about to receive.
@@ -258,3 +286,66 @@ export const integrationsService = {
     }
   },
 };
+
+// ─── Error-shaping helpers ────────────────────────────────────────────
+
+/**
+ * Translate a thrown error from the Account upsert (or anything else in the
+ * ingest pipeline) into a single human-readable string we can stash on
+ * `integration_events.status_reason`. The goal is admin-readable forensics —
+ * not anything machine-actionable. Anything we don't specifically recognise
+ * falls through to the underlying error message.
+ */
+async function describeIngestError(
+  err: unknown,
+  customer: CustomerActivatedPayload['customer'],
+): Promise<string> {
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    if (err.code === 'P2002') {
+      // err.meta.target is the conflicting unique constraint. In Postgres-
+      // backed Prisma this is a string[] of column names (snake_case).
+      const target = (err.meta?.target ?? []) as string[] | string;
+      const fields = Array.isArray(target) ? target : [String(target)];
+      const fieldList = fields.join(', ');
+
+      // For circuit_id specifically, look up the conflicting account so the
+      // admin can fix the data without an extra query — this is the failure
+      // mode we expect to see most often (reused circuit IDs from CRM-side
+      // test data or genuine duplicates).
+      if (fields.includes('circuit_id') && customer.circuitId) {
+        const owner = await prisma.account.findUnique({
+          where: { circuitId: customer.circuitId },
+          select: { id: true, externalCrmId: true, companyName: true, clientName: true },
+        });
+        if (owner) {
+          const ownerName = owner.companyName ?? owner.clientName ?? '(unnamed)';
+          return (
+            `P2002: duplicate circuit_id '${customer.circuitId}'. ` +
+            `Already owned by account ${owner.id} ` +
+            `(externalCrmId=${owner.externalCrmId ?? 'null'}, name='${ownerName}'). ` +
+            `Fix the data on CRM side — two accounts cannot share a circuit ID.`
+          );
+        }
+      }
+      return `P2002: unique constraint violation on (${fieldList}).`;
+    }
+    return `${err.code}: ${err.message}`;
+  }
+  if (err instanceof Error) return err.message;
+  return 'Unknown ingest error';
+}
+
+/**
+ * Update status_reason without throwing. Used in catch blocks where we don't
+ * want a logging failure to mask the original error we're about to re-throw.
+ */
+async function safeUpdateStatusReason(eventId: string, reason: string) {
+  try {
+    await prisma.integrationEvent.update({
+      where: { id: eventId },
+      data: { statusReason: reason },
+    });
+  } catch {
+    // Intentionally silent — caller is mid-error and re-throwing.
+  }
+}

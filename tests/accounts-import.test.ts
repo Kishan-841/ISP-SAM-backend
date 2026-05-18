@@ -152,6 +152,75 @@ describe('POST /accounts/import', () => {
     }
   });
 
+  it('returns preview rows for created + updated, with categorised error kinds', async () => {
+    const cookie = await adminCookie();
+
+    // First import the valid 3-row file — all created.
+    const first = await request(app)
+      .post('/accounts/import')
+      .set('Cookie', cookie)
+      .attach('file', fixture('valid.csv'), 'valid.csv');
+    expect(first.status).toBe(200);
+    expect(first.body.imported).toBe(3);
+    expect(first.body.updated).toBe(0);
+    expect(first.body.createdAccounts).toHaveLength(3);
+    expect(first.body.updatedAccounts).toHaveLength(0);
+    // Preview row shape — what the UI consumes.
+    const sample = first.body.createdAccounts[0];
+    expect(sample).toMatchObject({
+      rowNumber: expect.any(Number),
+      accountId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+      clientName: expect.any(String),
+      currentArc: expect.any(Number),
+      kittyType: expect.stringMatching(/^(BASE|NEW)$/),
+      contractStatus: expect.any(String),
+    });
+
+    // Re-import with reimport.csv — one row overlaps on leadId (update path),
+    // rest are new (create path). Confirms both preview arrays populate.
+    const second = await request(app)
+      .post('/accounts/import')
+      .set('Cookie', cookie)
+      .attach('file', fixture('reimport.csv'), 'reimport.csv');
+    expect(second.body.updatedAccounts.length).toBe(second.body.updated);
+    expect(second.body.createdAccounts.length).toBe(second.body.imported);
+
+    // Now exercise the error-categorisation path with the missing-required fixture.
+    const bad = await request(app)
+      .post('/accounts/import')
+      .set('Cookie', cookie)
+      .attach('file', fixture('missing-required.csv'), 'missing-required.csv');
+    expect(bad.body.errors.length).toBeGreaterThan(0);
+    for (const e of bad.body.errors) {
+      expect(['missing_field', 'invalid_value', 'duplicate', 'other']).toContain(e.kind);
+    }
+    // At least one row should be flagged as missing_field given the fixture's name.
+    expect(bad.body.errors.some((e: { kind: string }) => e.kind === 'missing_field')).toBe(true);
+  });
+
+  it('imports the Email column onto accounts.email (trims whitespace, treats blank as null)', async () => {
+    const cookie = await adminCookie();
+    const res = await request(app)
+      .post('/accounts/import')
+      .set('Cookie', cookie)
+      .attach('file', fixture('with-email.csv'), 'with-email.csv');
+    expect(res.status).toBe(200);
+    expect(res.body.imported).toBe(3);
+
+    const list = await request(app).get('/accounts').set('Cookie', cookie);
+    const byLead = new Map(
+      (list.body.accounts as Array<{ leadId: string; email: string | null }>).map((a) => [
+        a.leadId,
+        a.email,
+      ]),
+    );
+    expect(byLead.get('LEAD-EMAIL-1')).toBe('eva@example.com');
+    // Whitespace must be trimmed by the importer.
+    expect(byLead.get('LEAD-EMAIL-2')).toBe('frank@example.com');
+    // Empty cell stays null on the account, not ''.
+    expect(byLead.get('LEAD-EMAIL-3')).toBeNull();
+  });
+
   it('updates existing rows on re-import (idempotent on leadId)', async () => {
     const cookie = await adminCookie();
 

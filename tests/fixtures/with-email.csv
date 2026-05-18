@@ -1,0 +1,4 @@
+Customer Name,Email,Mobile,ARC,Status,Onboarding Date,Lead ID
+Eva Corp,eva@example.com,9999900100,480000,ACTIVE,2024-08-01,LEAD-EMAIL-1
+Frank Pvt Ltd,  frank@example.com  ,9999900101,540000,ACTIVE,2024-09-01,LEAD-EMAIL-2
+NoEmail Ltd,,9999900102,300000,ACTIVE,2024-10-01,LEAD-EMAIL-3

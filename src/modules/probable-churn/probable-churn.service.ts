@@ -27,6 +27,8 @@ export type ProbableChurnRow = {
     /** Current ARC — kept on the account until day 31. Used for "at risk" totals. */
     currentArc: number;
     kittyType: 'BASE' | 'NEW';
+    /** null = Excel-imported / not CRM-synced — UI hides the "sent to CRM" hint. */
+    externalCrmId: string | null;
   };
   /**
    * CRM hand-off info. Populated after SAM picks PROCEED on a CRM-synced
@@ -67,6 +69,7 @@ export async function listProbableChurn(
       contractStatus: true,
       currentArc: true,
       kittyType: true,
+      externalCrmId: true,
       samOwner: { select: { id: true, name: true, email: true } },
     },
   });
@@ -122,6 +125,7 @@ export async function listProbableChurn(
           contractStatus: a.contractStatus as 'PROBABLE_CHURN' | 'DISCONNECTING',
           currentArc: Number(a.currentArc),
           kittyType: a.kittyType,
+          externalCrmId: a.externalCrmId,
         },
         crmServiceOrderId: c.crmServiceOrderId,
         crmOrderNumber: c.crmOrderNumber,

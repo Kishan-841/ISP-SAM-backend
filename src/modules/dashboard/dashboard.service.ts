@@ -215,8 +215,13 @@ export const dashboardService = {
     let currentCustomers: number;
     let terminatedCount: number;
     if (opts.quarter) {
+      // Rate revisions intentionally NOT included: per the current business
+      // rule (CLAUDE.md gotcha #5) a rate revision keeps ARC unchanged
+      // (bandwidth uplift only), so `rateRevsArcChange` should always be 0.
+      // Defensively excluding it keeps the running ARC honest even if legacy
+      // data ever carried a non-zero delta on a RATE_REVISION row.
       const netDeltaArc =
-        upgradesArcAdded - downgradesArcReduced - rateRevsArcChange - terminationsArcLost;
+        upgradesArcAdded - downgradesArcReduced - terminationsArcLost;
       currentArc = startArc + netDeltaArc - probableChurnArc;
       terminatedCount = terminationsCount;
       currentCustomers = totalCustomers - terminationsCount - probableChurnAccounts.length;

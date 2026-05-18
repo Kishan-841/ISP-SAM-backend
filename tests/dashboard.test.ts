@@ -240,6 +240,36 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     expect(res.body.rateRevisions.arcChangeLakh).toBeCloseTo(0.2, 1);
   });
 
+  it('Quarter filter: rate revisions do NOT move currentArcLakh (same-ARC by definition)', async () => {
+    const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
+    const token = await tokenFor(admin.id, 'ADMIN');
+    const acct = await seedAccount({
+      kittyType: 'BASE',
+      currentArc: 600000,
+      startOfPeriodArc: 600000,
+    });
+    // Legacy-style RATE_REVISION row with a non-zero ARC delta (pre-rule-change
+    // data). The new aggregator must still ignore it for current-ARC purposes.
+    await prisma.commercialChange.create({
+      data: {
+        accountId: acct.id,
+        changeType: 'RATE_REVISION',
+        oldArc: 600000,
+        newArc: 540000,
+        effectiveDate: new Date('2026-04-15'),
+        clientApprovalAttached: true,
+        createdBy: admin.id,
+      },
+    });
+
+    const res = await authedGet(app, '/dashboard/existing-base?quarter=Q1', token);
+    // Aggregation row still reports the delta for forensics…
+    expect(res.body.rateRevisions.count).toBe(1);
+    expect(res.body.rateRevisions.arcChangeLakh).toBeCloseTo(0.6, 1);
+    // …but currentArcLakh equals startArc, NOT startArc minus the rate-rev delta.
+    expect(res.body.currentArcLakh).toBeCloseTo(res.body.totalBaseArcLakh, 1);
+  });
+
   it('ignores commercial changes against NEW kitty accounts (Existing Base only)', async () => {
     const admin = await seedUser({ email: 'admin@x.com', role: 'ADMIN' });
     const newAcct = await seedAccount({

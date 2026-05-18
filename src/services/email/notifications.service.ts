@@ -37,6 +37,24 @@ function isEnabled(): boolean {
   return process.env[ENABLED_KEY] === 'true';
 }
 
+/**
+ * Per-event opt-in. Lets one event type (e.g. MOM-to-customer) fire while
+ * the global flag stays off, so we can stage rollouts safely.
+ *
+ *   isEventEnabled('NOTIFY_MOM_TO_CUSTOMER')
+ *
+ * Resolution order:
+ *   1. NOTIFY_<EVENT>_ENABLED='true'  → enabled (overrides global off)
+ *   2. NOTIFY_<EVENT>_ENABLED='false' → disabled (overrides global on)
+ *   3. unset                          → falls back to the global ENABLED_KEY
+ */
+function isEventEnabled(eventKey: string): boolean {
+  const flag = process.env[`${eventKey}_ENABLED`];
+  if (flag === 'true') return true;
+  if (flag === 'false') return false;
+  return isEnabled();
+}
+
 function parseEmailList(raw: string | undefined): string[] | undefined {
   if (!raw) return undefined;
   const parts = raw
@@ -389,7 +407,7 @@ export async function sendMomToCustomer(input: {
   samDesignation?: string | null;
   /** SAM's phone for signature. */
   samPhone?: string | null;
-}): Promise<{ status: AuditOutcome }> {
+}): Promise<{ status: AuditOutcome; reason?: string; messageId?: string }> {
   const audit = {
     entityType: 'Meeting',
     entityId: input.meetingId,
@@ -397,15 +415,21 @@ export async function sendMomToCustomer(input: {
     performedBy: input.performedByUserId,
   };
 
-  if (!isEnabled()) {
-    await writeAudit(audit, 'SKIPPED', `${ENABLED_KEY} is not true`);
-    return { status: 'SKIPPED' };
+  // Per-event flag: NOTIFY_MOM_TO_CUSTOMER_ENABLED can independently enable
+  // MOM emails while the global ACCOUNTS_NOTIFICATIONS_ENABLED stays off
+  // (so the commercial-change alert path stays disabled during the MOM
+  // rollout test).
+  if (!isEventEnabled('NOTIFY_MOM_TO_CUSTOMER')) {
+    const reason = 'NOTIFY_MOM_TO_CUSTOMER_ENABLED is not true';
+    await writeAudit(audit, 'SKIPPED', reason);
+    return { status: 'SKIPPED', reason };
   }
 
   const customerEmail = input.toOverride?.trim() || input.account.email?.trim();
   if (!customerEmail) {
-    await writeAudit(audit, 'MISCONFIGURED', 'Account has no customer email on record');
-    return { status: 'MISCONFIGURED' };
+    const reason = 'Account has no customer email on record';
+    await writeAudit(audit, 'MISCONFIGURED', reason);
+    return { status: 'MISCONFIGURED', reason };
   }
 
   // Owning SAM is the From: address (Reply-To-equivalent — customer replies
@@ -469,7 +493,10 @@ export async function sendMomToCustomer(input: {
   }
 
   const result = await dispatch({ message, audit });
-  return result.status === 'sent' ? { status: 'SENT' } : { status: 'FAILED' };
+  if (result.status === 'sent') {
+    return { status: 'SENT', messageId: result.messageId };
+  }
+  return { status: 'FAILED', reason: result.error ?? 'Email transport returned a failure' };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────

@@ -91,31 +91,42 @@ export function getEmailClient(): EmailClient {
 }
 
 function buildClientFromEnv(): EmailClient {
-  // Prefer Resend when its API key is set — that's the active transport for
-  // production today. Accept either RESEND_API_KEY (canonical) or the
-  // lowercase resend_api_key (some shells / dotenv loaders preserve case).
-  const resendKey = process.env.RESEND_API_KEY ?? process.env.resend_api_key;
-  if (resendKey) {
-    return new ResendEmailClient({
-      apiKey: resendKey,
-      fromEmail: process.env.RESEND_FROM_EMAIL ?? 'onboarding@resend.dev',
-      fromName: process.env.RESEND_FROM_NAME ?? 'Gazon SAM',
-      replyTo: process.env.RESEND_REPLY_TO,
-    });
-  }
-  // Legacy Netcore transport — kept as a fallback in case anyone still has
-  // those creds set on a deployed env.
-  const netcoreKey = process.env.NETCORE_API_KEY;
-  const netcoreFrom = process.env.NETCORE_FROM_EMAIL;
-  if (netcoreKey && netcoreFrom) {
-    return new NetcoreEmailClient({
-      apiKey: netcoreKey,
-      fromEmail: netcoreFrom,
-      fromName: process.env.NETCORE_FROM_NAME ?? 'Gazon SAM',
-      replyTo: process.env.NETCORE_REPLY_TO,
-    });
-  }
-  return new LoggingEmailClient();
+  // EMAIL_TRANSPORT explicitly picks the transport, ignoring the
+  // auto-detect that would otherwise prefer Resend when its key is set.
+  //   EMAIL_TRANSPORT=netcore  → Netcore (production)
+  //   EMAIL_TRANSPORT=resend   → Resend
+  //   EMAIL_TRANSPORT=logging  → no-op stub (good for local dev)
+  //   unset / anything else    → auto-detect (Resend → Netcore → logging)
+  const explicit = (process.env.EMAIL_TRANSPORT ?? '').trim().toLowerCase();
+  if (explicit === 'logging') return new LoggingEmailClient();
+  if (explicit === 'netcore') return buildNetcore() ?? new LoggingEmailClient();
+  if (explicit === 'resend') return buildResend() ?? new LoggingEmailClient();
+  // Auto-detect — Resend first, then Netcore, finally logging stub.
+  return buildResend() ?? buildNetcore() ?? new LoggingEmailClient();
+}
+
+function buildNetcore(): NetcoreEmailClient | null {
+  const apiKey = process.env.NETCORE_API_KEY;
+  const fromEmail = process.env.NETCORE_FROM_EMAIL;
+  if (!apiKey || !fromEmail) return null;
+  return new NetcoreEmailClient({
+    apiKey,
+    fromEmail,
+    fromName: process.env.NETCORE_FROM_NAME ?? 'Gazon SAM',
+    replyTo: process.env.NETCORE_REPLY_TO,
+  });
+}
+
+function buildResend(): ResendEmailClient | null {
+  // Accept either RESEND_API_KEY (canonical) or the lowercase variant.
+  const apiKey = process.env.RESEND_API_KEY ?? process.env.resend_api_key;
+  if (!apiKey) return null;
+  return new ResendEmailClient({
+    apiKey,
+    fromEmail: process.env.RESEND_FROM_EMAIL ?? 'onboarding@resend.dev',
+    fromName: process.env.RESEND_FROM_NAME ?? 'Gazon SAM',
+    replyTo: process.env.RESEND_REPLY_TO,
+  });
 }
 
 /** Used by tests to swap in a fake. */

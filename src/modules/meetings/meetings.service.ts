@@ -302,7 +302,11 @@ export const meetingsService = {
           payload: { outcome: 'SKIPPED', detail: 'testMode=true (no email dispatched)' },
         },
       });
-      return { meeting, emailStatus: 'SKIPPED' as const };
+      return {
+        meeting,
+        emailStatus: 'SKIPPED' as const,
+        emailReason: 'testMode=true (no email dispatched)',
+      };
     }
 
     const emailResult = await sendMomToCustomer({
@@ -324,7 +328,12 @@ export const meetingsService = {
       samPhone: input.samPhone,
     });
 
-    return { meeting, emailStatus: emailResult.status };
+    return {
+      meeting,
+      emailStatus: emailResult.status,
+      emailReason: emailResult.reason,
+      emailMessageId: emailResult.messageId,
+    };
   },
 
   async completeMeeting(input: CompleteMeetingInput) {
@@ -399,7 +408,11 @@ export const meetingsService = {
           payload: { outcome: 'SKIPPED', detail: 'testMode=true (no email dispatched)' },
         },
       });
-      return { meeting, emailStatus: 'SKIPPED' as const };
+      return {
+        meeting,
+        emailStatus: 'SKIPPED' as const,
+        emailReason: 'testMode=true (no email dispatched)',
+      };
     }
 
     const emailResult = await sendMomToCustomer({
@@ -421,7 +434,12 @@ export const meetingsService = {
       samPhone: input.samPhone,
     });
 
-    return { meeting, emailStatus: emailResult.status };
+    return {
+      meeting,
+      emailStatus: emailResult.status,
+      emailReason: emailResult.reason,
+      emailMessageId: emailResult.messageId,
+    };
   },
 
   async remove(input: DeleteMeetingInput) {

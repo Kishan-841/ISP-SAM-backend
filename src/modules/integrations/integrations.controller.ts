@@ -38,6 +38,20 @@ const customerActivatedSchema = z.object({
   customer: customerSchema,
 });
 
+// Inbound `quickDisconnect.decided` payload. Contract: see CRM repo
+// docs/integrations/sam-quick-disconnect-contract.md §2.
+const quickDisconnectDecisionSchema = z.object({
+  eventId: z.string().uuid(),
+  eventType: z.literal('quickDisconnect.decided'),
+  occurredAt: z
+    .string()
+    .refine((s) => !Number.isNaN(Date.parse(s)), 'Invalid occurredAt'),
+  commercialChangeId: z.string().uuid(),
+  decision: z.enum(['APPROVE', 'REJECT']),
+  decidedBy: z.string().min(1),
+  note: z.string().optional(),
+});
+
 function ctxFromReq(req: Request) {
   const r = req as VerifiedRequest;
   return {
@@ -93,6 +107,66 @@ export const integrationsController = {
       status: 'processed',
       eventId: result.eventId,
       accountId: result.accountId,
+    });
+  },
+
+  /**
+   * Inbound `quickDisconnect.decided` from CRM.
+   * Signature already verified by the route's verifyCrmWebhook middleware
+   * (same shared secret + same scheme as customer.activated per contract §1.5).
+   *
+   * Response codes match the contract §2.4 — what CRM expects:
+   *   200 / 201 → processed (DELIVERED on CRM side, no retry)
+   *   400      → bad payload (CRM marks FAILED, no retry)
+   *   404      → unknown commercialChangeId (CRM marks FAILED, no retry)
+   *   5xx      → transient (CRM retries with backoff)
+   */
+  async quickDisconnectDecision(req: Request, res: Response) {
+    const parse = quickDisconnectDecisionSchema.safeParse(req.body);
+    if (!parse.success) {
+      const reason = parse.error.issues
+        .map((i) => `${i.path.join('.')}: ${i.message}`)
+        .join('; ');
+      const partial = req.body && typeof req.body === 'object' ? req.body : {};
+      const candidateId =
+        typeof (partial as { eventId?: unknown }).eventId === 'string'
+          ? (partial as { eventId: string }).eventId
+          : null;
+      await integrationsService.recordRejection({
+        externalEventId: candidateId,
+        eventType:
+          typeof (partial as { eventType?: unknown }).eventType === 'string'
+            ? ((partial as { eventType: string }).eventType)
+            : 'quickDisconnect.decided',
+        occurredAt: null,
+        reason: `validation: ${reason}`,
+        payload: req.body,
+        ...ctxFromReq(req),
+      });
+      res.status(400).json({ error: 'Validation failed', detail: reason });
+      return;
+    }
+
+    const result = await integrationsService.ingestQuickDisconnectDecision(
+      parse.data,
+      ctxFromReq(req),
+    );
+
+    if (result.status === 'DUPLICATE') {
+      res
+        .status(200)
+        .json({ status: 'already_processed', eventId: result.eventId, deduped: true });
+      return;
+    }
+    if (result.status === 'NOT_FOUND') {
+      res.status(404).json({ status: 'not_found', reason: result.reason });
+      return;
+    }
+    res.status(201).json({
+      status: 'processed',
+      eventId: result.eventId,
+      accountId: result.accountId,
+      decision: result.decision,
     });
   },
 

@@ -50,6 +50,30 @@ export type IngestResult =
   | { status: 'PROCESSED'; accountId: string; eventId: string }
   | { status: 'DUPLICATE'; eventId: string; accountId: string | null };
 
+/** Payload of the `quickDisconnect.decided` webhook (CRM → SAM). Matches
+ *  the contract at docs/integrations/sam-quick-disconnect-contract.md §2. */
+export type QuickDisconnectDecisionPayload = {
+  eventId: string;
+  eventType: 'quickDisconnect.decided';
+  occurredAt: string;
+  commercialChangeId: string;
+  decision: 'APPROVE' | 'REJECT';
+  decidedBy: string;
+  note?: string;
+};
+
+export type QuickDisconnectIngestResult =
+  | { status: 'PROCESSED'; eventId: string; accountId: string; decision: 'APPROVE' | 'REJECT' }
+  | { status: 'DUPLICATE'; eventId: string }
+  | { status: 'NOT_FOUND'; eventId: string; reason: string };
+
+function startOfDayUtcPlusDays(now: Date, days: number): Date {
+  const out = new Date(now);
+  out.setUTCHours(0, 0, 0, 0);
+  out.setUTCDate(out.getUTCDate() + days);
+  return out;
+}
+
 /**
  * Idempotently ingest a customer.activated webhook from the CRM.
  *
@@ -237,6 +261,157 @@ export const integrationsService = {
       total,
       page,
       pageSize,
+    };
+  },
+
+  /**
+   * Inbound `quickDisconnect.decided` — CRM's super-admin has approved or
+   * rejected a QUICK disconnect SAM raised earlier. Idempotent on eventId.
+   *
+   * APPROVE: account flips PENDING_QUICK_APPROVAL → DISCONNECTING with
+   *          scheduledTerminationAt = today + quickRequestedDays. The
+   *          existing sweepDueTerminations() picks it up on the right day.
+   *
+   * REJECT:  account reverts to ACTIVE, the commercial-change row stays in
+   *          place for audit with quickApprovalDecision=REJECTED + note.
+   *
+   * Contract: docs/integrations/sam-quick-disconnect-contract.md §2
+   */
+  async ingestQuickDisconnectDecision(
+    payload: QuickDisconnectDecisionPayload,
+    ctx: IngestContext,
+  ): Promise<QuickDisconnectIngestResult> {
+    // 1. Reserve the eventId in integration_events. The @unique on
+    //    externalEventId makes this race-safe and gives us natural dedupe.
+    let event;
+    try {
+      event = await prisma.integrationEvent.create({
+        data: {
+          source: 'CRM',
+          eventType: payload.eventType,
+          externalEventId: payload.eventId,
+          occurredAt: new Date(payload.occurredAt),
+          status: 'FAILED', // overwritten on success
+          payload: payload as unknown as Prisma.InputJsonValue,
+          signatureHeader: ctx.signatureHeader,
+          timestampHeader: ctx.timestampHeader,
+          remoteAddr: ctx.remoteAddr,
+        },
+      });
+    } catch (err) {
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2002'
+      ) {
+        const existing = await prisma.integrationEvent.findUnique({
+          where: { externalEventId: payload.eventId },
+          select: { id: true },
+        });
+        return { status: 'DUPLICATE', eventId: existing?.id ?? payload.eventId };
+      }
+      throw err;
+    }
+
+    // 2. Look up the commercial change. Unknown id = 404 so CRM marks the
+    //    delivery FAILED (won't retry) and an operator can investigate.
+    const change = await prisma.commercialChange.findUnique({
+      where: { id: payload.commercialChangeId },
+      include: { account: { select: { id: true, contractStatus: true } } },
+    });
+    if (!change) {
+      const reason = `Unknown commercialChangeId ${payload.commercialChangeId}`;
+      await safeUpdateStatusReason(event.id, reason);
+      return { status: 'NOT_FOUND', eventId: event.id, reason };
+    }
+
+    // Defensive — only QUICK rows should ever receive this webhook.
+    if (change.disconnectionMode !== 'QUICK') {
+      const reason = `commercialChange ${payload.commercialChangeId} is not a QUICK disconnect (mode=${change.disconnectionMode ?? 'null'})`;
+      await safeUpdateStatusReason(event.id, reason);
+      return { status: 'NOT_FOUND', eventId: event.id, reason };
+    }
+
+    // 3. Apply the decision. Both branches stamp the decision metadata on
+    //    the commercial-change row, then mutate the account state.
+    try {
+      if (payload.decision === 'APPROVE') {
+        const days = change.quickRequestedDays ?? 1;
+        const scheduledTerminationAt = startOfDayUtcPlusDays(new Date(), days);
+        await prisma.$transaction([
+          prisma.commercialChange.update({
+            where: { id: change.id },
+            data: {
+              quickApprovalDecision: 'APPROVED',
+              quickApprovalDecidedAt: new Date(payload.occurredAt),
+              quickApprovalDecidedBy: payload.decidedBy,
+              quickApprovalNote: payload.note ?? null,
+              scheduledTerminationAt,
+              // Mark as "decision applied to account" so the dashboard
+              // counts/sweep treat this as in-flight.
+              retentionDecision: 'PROCEED',
+              retentionDecidedAt: new Date(payload.occurredAt),
+            },
+          }),
+          prisma.account.update({
+            where: { id: change.accountId },
+            data: { contractStatus: 'DISCONNECTING' },
+          }),
+        ]);
+      } else {
+        // REJECT
+        await prisma.$transaction([
+          prisma.commercialChange.update({
+            where: { id: change.id },
+            data: {
+              quickApprovalDecision: 'REJECTED',
+              quickApprovalDecidedAt: new Date(payload.occurredAt),
+              quickApprovalDecidedBy: payload.decidedBy,
+              quickApprovalNote: payload.note ?? null,
+              // Stamp a retention decision so audit trail / dashboards see
+              // the row as closed (not still pending).
+              retentionDecision: 'RETAIN',
+              retentionDecidedAt: new Date(payload.occurredAt),
+            },
+          }),
+          prisma.account.update({
+            where: { id: change.accountId },
+            data: { contractStatus: 'ACTIVE' },
+          }),
+        ]);
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'Apply failed';
+      await safeUpdateStatusReason(event.id, reason);
+      throw err;
+    }
+
+    // 4. Mark the integration event PROCESSED + audit.
+    await prisma.integrationEvent.update({
+      where: { id: event.id },
+      data: { status: 'PROCESSED', accountId: change.accountId, statusReason: null },
+    });
+    await prisma.auditLog.create({
+      data: {
+        entityType: 'CommercialChange',
+        entityId: change.id,
+        action:
+          payload.decision === 'APPROVE'
+            ? 'QUICK_DISCONNECT_APPROVED'
+            : 'QUICK_DISCONNECT_REJECTED',
+        performedBy: SYSTEM_USER_ID,
+        payload: {
+          eventId: payload.eventId,
+          decidedBy: payload.decidedBy,
+          note: payload.note ?? null,
+        },
+      },
+    });
+
+    return {
+      status: 'PROCESSED',
+      eventId: event.id,
+      accountId: change.accountId,
+      decision: payload.decision,
     };
   },
 

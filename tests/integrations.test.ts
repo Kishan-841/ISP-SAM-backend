@@ -374,3 +374,160 @@ describe('POST /integrations/crm/customer-activated', () => {
     });
   });
 });
+
+// ─── quickDisconnect.decided webhook (CRM → SAM) ─────────────────────
+
+describe('POST /integrations/crm/quick-disconnect-decision', () => {
+  type Decision = {
+    eventId: string;
+    eventType: 'quickDisconnect.decided';
+    occurredAt: string;
+    commercialChangeId: string;
+    decision: 'APPROVE' | 'REJECT';
+    decidedBy: string;
+    note?: string;
+  };
+
+  function sampleDecision(
+    commercialChangeId: string,
+    overrides: Partial<Decision> = {},
+  ): Decision {
+    return {
+      eventId: crypto.randomUUID(),
+      eventType: 'quickDisconnect.decided',
+      occurredAt: new Date().toISOString(),
+      commercialChangeId,
+      decision: 'APPROVE',
+      decidedBy: 'admin@gazoncrm.com',
+      ...overrides,
+    };
+  }
+
+  function signDecision(payload: Decision, secret = TEST_SECRET, ts?: number) {
+    const timestamp = ts ?? Math.floor(Date.now() / 1000);
+    const body = JSON.stringify(payload);
+    const signature = crypto
+      .createHmac('sha256', secret)
+      .update(`${timestamp}.`)
+      .update(body)
+      .digest('hex');
+    return { body, signature, ts: timestamp };
+  }
+
+  function postDecision(payload: Decision) {
+    const { body, signature, ts } = signDecision(payload);
+    return request(app)
+      .post('/integrations/crm/quick-disconnect-decision')
+      .set('Content-Type', 'application/json')
+      .set('X-CRM-Signature', signature)
+      .set('X-CRM-Timestamp', String(ts))
+      .send(body);
+  }
+
+  async function seedQuickPendingChange(opts?: { days?: number }) {
+    // Need a SAM user + an account in PENDING_QUICK_APPROVAL + a QUICK row.
+    const user = await prisma.user.create({
+      data: {
+        email: `sam-${crypto.randomUUID()}@test.local`,
+        name: 'Test SAM',
+        passwordHash: 'x',
+        role: 'SAM',
+      },
+    });
+    const account = await prisma.account.create({
+      data: {
+        clientName: 'Quick Test Customer',
+        kittyType: 'NEW',
+        contractStatus: 'PENDING_QUICK_APPROVAL',
+        currentArc: '120000',
+        onboardingDate: new Date('2026-05-01'),
+        externalCrmId: `lead-${crypto.randomUUID().slice(0, 8)}`,
+      },
+    });
+    const change = await prisma.commercialChange.create({
+      data: {
+        accountId: account.id,
+        changeType: 'DISCONNECTION',
+        oldArc: '120000',
+        newArc: '0',
+        effectiveDate: new Date('2026-05-19'),
+        clientApprovalAttached: true,
+        createdBy: user.id,
+        disconnectionMode: 'QUICK',
+        quickRequestedDays: opts?.days ?? 5,
+        quickApprovalReason: 'Customer relocating out of service area.',
+      },
+    });
+    return { user, account, change };
+  }
+
+  it('APPROVE flips account to DISCONNECTING and sets scheduledTerminationAt', async () => {
+    const { account, change } = await seedQuickPendingChange({ days: 5 });
+    const res = await postDecision(
+      sampleDecision(change.id, { decision: 'APPROVE', note: 'eligible per clause 4.2' }),
+    );
+
+    expect(res.status).toBe(201);
+    expect(res.body.decision).toBe('APPROVE');
+
+    const acctAfter = await prisma.account.findUnique({ where: { id: account.id } });
+    expect(acctAfter?.contractStatus).toBe('DISCONNECTING');
+
+    const ccAfter = await prisma.commercialChange.findUnique({ where: { id: change.id } });
+    expect(ccAfter?.quickApprovalDecision).toBe('APPROVED');
+    expect(ccAfter?.quickApprovalNote).toBe('eligible per clause 4.2');
+    expect(ccAfter?.quickApprovalDecidedBy).toBe('admin@gazoncrm.com');
+    expect(ccAfter?.scheduledTerminationAt).not.toBeNull();
+  });
+
+  it('REJECT reverts account to ACTIVE and stamps the note', async () => {
+    const { account, change } = await seedQuickPendingChange();
+    const res = await postDecision(
+      sampleDecision(change.id, {
+        decision: 'REJECT',
+        note: 'Insufficient justification — resubmit as normal.',
+      }),
+    );
+
+    expect(res.status).toBe(201);
+    const acctAfter = await prisma.account.findUnique({ where: { id: account.id } });
+    expect(acctAfter?.contractStatus).toBe('ACTIVE');
+
+    const ccAfter = await prisma.commercialChange.findUnique({ where: { id: change.id } });
+    expect(ccAfter?.quickApprovalDecision).toBe('REJECTED');
+    expect(ccAfter?.quickApprovalNote).toMatch(/Insufficient justification/);
+    expect(ccAfter?.scheduledTerminationAt).toBeNull();
+  });
+
+  it('returns 200 deduped on idempotent replay', async () => {
+    const { change } = await seedQuickPendingChange();
+    const decision = sampleDecision(change.id);
+    const first = await postDecision(decision);
+    expect(first.status).toBe(201);
+
+    // Replay with the SAME eventId — must not double-apply.
+    const second = await postDecision(decision);
+    expect(second.status).toBe(200);
+    expect(second.body.deduped).toBe(true);
+  });
+
+  it('returns 404 when commercialChangeId is unknown', async () => {
+    const decision = sampleDecision(crypto.randomUUID());
+    const res = await postDecision(decision);
+    expect(res.status).toBe(404);
+    expect(res.body.reason).toMatch(/Unknown commercialChangeId/);
+  });
+
+  it('returns 401 on a tampered signature', async () => {
+    const { change } = await seedQuickPendingChange();
+    const decision = sampleDecision(change.id);
+    const { body, ts } = signDecision(decision, 'wrong-secret');
+    const res = await request(app)
+      .post('/integrations/crm/quick-disconnect-decision')
+      .set('Content-Type', 'application/json')
+      .set('X-CRM-Signature', body) // garbage
+      .set('X-CRM-Timestamp', String(ts))
+      .send(body);
+    expect(res.status).toBe(401);
+  });
+});

@@ -9,6 +9,7 @@ import {
   type CreateServiceOrderInput,
   type ServiceOrderType,
 } from '../../services/integrations/crm/index.js';
+import { pushQuickDisconnectRequest } from '../../services/integrations/crm/crm-quick-disconnect-client.js';
 import { getApprovalFileUploader } from '../../services/storage/cloudinary-storage.js';
 import {
   sendCommercialChangeAlert,
@@ -304,10 +305,16 @@ export const commercialChangesService = {
 
     if (input.changeType === 'DISCONNECTION') {
       if (isQuick) {
-        // QUICK path: skip the 21-day retention. Account waits for CRM Admin
-        // approval; no CRM service order is raised yet — that happens once
-        // the webhook lands and we flip the account to DISCONNECTING.
+        // QUICK path: skip the 21-day retention. Push the request to CRM's
+        // admin queue so the super-admin can approve/reject. Account stays
+        // in PENDING_QUICK_APPROVAL until the CRM webhook lands with a
+        // decision (handled in integrations.controller.ts).
         await enterPendingQuickApproval(result.id);
+        await notifyCrmQuickDisconnectRequested({
+          commercialChange: result,
+          account,
+          performingUser,
+        });
         crm = { ok: 'pending-quick-approval' };
       } else {
         await enterProbableChurn(result.id);
@@ -816,6 +823,82 @@ async function enterProbableChurn(commercialChangeId: string): Promise<void> {
       where: { id: change.accountId },
       data: { contractStatus: 'PROBABLE_CHURN' },
     });
+  });
+}
+
+/**
+ * Push the quick-disconnect request to CRM's admin inbox. Best-effort —
+ * failure does NOT roll back the SAM-side state. The account stays in
+ * PENDING_QUICK_APPROVAL with an audit row stamped FAILED so an operator
+ * can manually retry from the UI. CRM dedupes on eventId, so a retry with
+ * a fresh eventId is fine (a future "retry" button will generate a new id).
+ *
+ * Contract: see CRM repo docs/integrations/sam-quick-disconnect-contract.md
+ */
+async function notifyCrmQuickDisconnectRequested(opts: {
+  commercialChange: {
+    id: string;
+    newBandwidthMbps: number | null;
+    quickRequestedDays: number | null;
+    quickApprovalReason: string | null;
+  };
+  account: { externalCrmId: string | null; currentArc: Prisma.Decimal; currentPlan: string | null };
+  performingUser: { id: string; email: string };
+}): Promise<void> {
+  const { commercialChange: cc, account, performingUser } = opts;
+
+  // Excel-imported accounts have no CRM lead to push against — record that
+  // and stop. SAM admin can hand off manually if needed.
+  if (!account.externalCrmId) {
+    await prisma.auditLog.create({
+      data: {
+        entityType: 'CommercialChange',
+        entityId: cc.id,
+        action: 'NOTIFY_CRM_QUICK_DISCONNECT_REQUESTED',
+        performedBy: performingUser.id,
+        payload: {
+          outcome: 'SKIPPED',
+          detail: 'Account has no externalCrmId (Excel-imported) — no CRM lead to push against.',
+        },
+      },
+    });
+    return;
+  }
+
+  const result = await pushQuickDisconnectRequest({
+    commercialChangeId: cc.id,
+    externalCrmId: account.externalCrmId,
+    raisedBy: { id: performingUser.id, email: performingUser.email },
+    reason: cc.quickApprovalReason ?? '(no reason provided)',
+    requested: {
+      arc: Number(account.currentArc),
+      planName: account.currentPlan ?? undefined,
+      bandwidth: cc.newBandwidthMbps ?? undefined,
+      days: cc.quickRequestedDays ?? undefined,
+    },
+  });
+
+  await prisma.auditLog.create({
+    data: {
+      entityType: 'CommercialChange',
+      entityId: cc.id,
+      action: 'NOTIFY_CRM_QUICK_DISCONNECT_REQUESTED',
+      performedBy: performingUser.id,
+      payload: result.ok
+        ? {
+            outcome: 'SENT',
+            eventId: result.eventId,
+            status: result.status,
+            deduped: result.deduped ?? false,
+          }
+        : {
+            outcome: 'FAILED',
+            eventId: result.eventId,
+            status: result.status,
+            error: result.error,
+            retriable: result.retriable,
+          },
+    },
   });
 }
 

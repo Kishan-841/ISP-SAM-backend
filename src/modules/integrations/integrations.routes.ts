@@ -14,6 +14,14 @@ integrationsRouter.post(
   integrationsController.customerActivated,
 );
 
+// CRM Admin's APPROVE / REJECT decision on a SAM-raised QUICK disconnect.
+// Same shared secret + signing scheme as customer.activated per contract §1.5.
+integrationsRouter.post(
+  '/crm/quick-disconnect-decision',
+  requireCrmSignature,
+  integrationsController.quickDisconnectDecision,
+);
+
 // Admin-only forensic log of every webhook received.
 integrationsRouter.get(
   '/events',

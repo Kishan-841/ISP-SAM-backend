@@ -39,6 +39,17 @@ export type CommitInput = {
   disconnectionCategoryId?: string;
   disconnectionSubCategoryId?: string;
   disconnectionReason?: string;
+  /** 'NORMAL' (default) — the existing 21-day retention flow.
+   *  'QUICK' — skip retention, wait for CRM Admin to approve, then
+   *           terminate in `quickRequestedDays` days. Gated by the
+   *           QUICK_DISCONNECT_ENABLED env flag. */
+  disconnectionMode?: 'NORMAL' | 'QUICK';
+  /** Required when disconnectionMode='QUICK'. 1..15 days from approval to
+   *  actual termination. */
+  quickRequestedDays?: number;
+  /** Required when disconnectionMode='QUICK'. Free text justification shown
+   *  to the CRM Admin verbatim on their approval queue. */
+  quickApprovalReason?: string;
   /** Optional notes forwarded to CRM as `notes` on the service-order request. */
   notes?: string;
   /** When true (and SAM_TEST_MODE permits), the doc-attachment requirement is
@@ -81,11 +92,17 @@ export type CommitResult = {
     | { ok: false; error: string; status?: number }
     | { ok: 'disabled' }
     | { ok: 'local-only' }
-    | { ok: 'probable-churn' };
+    | { ok: 'probable-churn' }
+    | { ok: 'pending-quick-approval' };
 };
 
 export const PROBABLE_CHURN_WINDOW_DAYS = 21;
 export const DISCONNECTION_NOTICE_DAYS = 10;
+export const QUICK_DISCONNECT_MAX_DAYS = 15;
+
+function isQuickDisconnectEnabled(): boolean {
+  return process.env.QUICK_DISCONNECT_ENABLED === 'true';
+}
 
 export const commercialChangesService = {
   async commit(input: CommitInput): Promise<CommitResult> {
@@ -116,6 +133,36 @@ export const commercialChangesService = {
       throw new Error(
         'DISCONNECTION_IN_FLIGHT: A disconnection is already in the 21-day retention window. Either retain via a rate revision or wait for the day-21 prompt.',
       );
+    }
+    if (account.contractStatus === 'PENDING_QUICK_APPROVAL') {
+      throw new Error(
+        'ACCOUNT_PENDING_QUICK_APPROVAL: A quick-disconnect request is awaiting CRM admin approval. Wait for the decision before raising another change.',
+      );
+    }
+
+    // Quick-disconnect validation. Only applies when the caller explicitly
+    // set mode=QUICK on a DISCONNECTION row; everything else routes through
+    // the existing 21-day retention flow.
+    const isQuick =
+      input.changeType === 'DISCONNECTION' && input.disconnectionMode === 'QUICK';
+    if (isQuick) {
+      if (!isQuickDisconnectEnabled()) {
+        throw new Error(
+          'QUICK_DISCONNECT_DISABLED: Quick disconnect is not enabled on this environment. Set QUICK_DISCONNECT_ENABLED=true once the CRM admin queue is live.',
+        );
+      }
+      const days = input.quickRequestedDays ?? 0;
+      if (!Number.isInteger(days) || days < 1 || days > QUICK_DISCONNECT_MAX_DAYS) {
+        throw new Error(
+          `QUICK_DISCONNECT_INVALID_DAYS: quickRequestedDays must be an integer between 1 and ${QUICK_DISCONNECT_MAX_DAYS}.`,
+        );
+      }
+      const reason = (input.quickApprovalReason ?? '').trim();
+      if (reason.length < 10) {
+        throw new Error(
+          'QUICK_DISCONNECT_REASON_REQUIRED: quickApprovalReason must be at least 10 characters — CRM admin needs the justification to make an informed decision.',
+        );
+      }
     }
 
     const performingUser = await prisma.user.findUnique({
@@ -194,6 +241,14 @@ export const commercialChangesService = {
           disconnectionCategoryId: input.disconnectionCategoryId ?? null,
           disconnectionSubCategoryId: input.disconnectionSubCategoryId ?? null,
           disconnectionReason: input.disconnectionReason ?? null,
+          // Quick-disconnect fields. Mode defaults to 'NORMAL' on DISCONNECTION
+          // rows for clarity; left NULL for non-disconnection rows.
+          disconnectionMode:
+            input.changeType === 'DISCONNECTION'
+              ? (input.disconnectionMode ?? 'NORMAL')
+              : null,
+          quickRequestedDays: isQuick ? (input.quickRequestedDays ?? null) : null,
+          quickApprovalReason: isQuick ? (input.quickApprovalReason ?? null) : null,
         },
       });
 
@@ -248,8 +303,16 @@ export const commercialChangesService = {
     }
 
     if (input.changeType === 'DISCONNECTION') {
-      await enterProbableChurn(result.id);
-      crm = { ok: 'probable-churn' };
+      if (isQuick) {
+        // QUICK path: skip the 21-day retention. Account waits for CRM Admin
+        // approval; no CRM service order is raised yet — that happens once
+        // the webhook lands and we flip the account to DISCONNECTING.
+        await enterPendingQuickApproval(result.id);
+        crm = { ok: 'pending-quick-approval' };
+      } else {
+        await enterProbableChurn(result.id);
+        crm = { ok: 'probable-churn' };
+      }
     } else if (!account.externalCrmId) {
       await applyChangeToAccount(result.id);
       crm = { ok: 'local-only' };
@@ -752,6 +815,41 @@ async function enterProbableChurn(commercialChangeId: string): Promise<void> {
     await tx.account.update({
       where: { id: change.accountId },
       data: { contractStatus: 'PROBABLE_CHURN' },
+    });
+  });
+}
+
+/**
+ * Quick-disconnect entrypoint — flips the account to PENDING_QUICK_APPROVAL
+ * and writes an audit-log entry so the CRM Admin's pending queue and the
+ * SAM-side activity feed both have a record.
+ *
+ * No CRM service order is raised here. That happens later when the CRM
+ * webhook arrives with `decision='APPROVE'` and we flip the account to
+ * DISCONNECTING with `scheduledTerminationAt = approvedAt + quickRequestedDays`.
+ */
+async function enterPendingQuickApproval(commercialChangeId: string): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    const change = await tx.commercialChange.findUnique({
+      where: { id: commercialChangeId },
+    });
+    if (!change) throw new Error('Commercial change not found');
+    await tx.account.update({
+      where: { id: change.accountId },
+      data: { contractStatus: 'PENDING_QUICK_APPROVAL' },
+    });
+    await tx.auditLog.create({
+      data: {
+        entityType: 'CommercialChange',
+        entityId: commercialChangeId,
+        action: 'QUICK_DISCONNECT_REQUESTED',
+        performedBy: change.createdBy,
+        payload: {
+          accountId: change.accountId,
+          quickRequestedDays: change.quickRequestedDays,
+          quickApprovalReason: change.quickApprovalReason,
+        },
+      },
     });
   });
 }

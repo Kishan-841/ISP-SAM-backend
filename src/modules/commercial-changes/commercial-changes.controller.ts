@@ -20,6 +20,12 @@ const bodySchema = z.object({
   disconnectionCategoryId: z.string().optional(),
   disconnectionSubCategoryId: z.string().optional(),
   disconnectionReason: z.string().optional(),
+  // Quick-disconnect workflow (DISCONNECTION rows only). The service does
+  // the full validation — including the QUICK_DISCONNECT_ENABLED feature
+  // gate, the 1..15 day range, and the min-10-char reason check.
+  disconnectionMode: z.enum(['NORMAL', 'QUICK']).optional(),
+  quickRequestedDays: z.coerce.number().int().optional(),
+  quickApprovalReason: z.string().optional(),
   notes: z.string().optional(),
 });
 
@@ -109,6 +115,9 @@ export const commercialChangesController = {
         disconnectionCategoryId: parse.data.disconnectionCategoryId,
         disconnectionSubCategoryId: parse.data.disconnectionSubCategoryId,
         disconnectionReason: parse.data.disconnectionReason,
+        disconnectionMode: parse.data.disconnectionMode,
+        quickRequestedDays: parse.data.quickRequestedDays,
+        quickApprovalReason: parse.data.quickApprovalReason,
         notes: parse.data.notes,
         testMode: bypassDocs,
       });
@@ -123,7 +132,7 @@ export const commercialChangesController = {
       // can match on if it ever needs to branch on type.
       if (
         err instanceof Error &&
-        /^(ACCOUNT_TERMINATED|ACCOUNT_DISCONNECTING|DISCONNECTION_IN_FLIGHT):/.test(err.message)
+        /^(ACCOUNT_TERMINATED|ACCOUNT_DISCONNECTING|DISCONNECTION_IN_FLIGHT|ACCOUNT_PENDING_QUICK_APPROVAL|QUICK_DISCONNECT_DISABLED|QUICK_DISCONNECT_INVALID_DAYS|QUICK_DISCONNECT_REASON_REQUIRED):/.test(err.message)
       ) {
         res.status(422).json({ error: err.message });
         return;

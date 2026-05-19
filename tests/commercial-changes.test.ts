@@ -922,3 +922,101 @@ describe('CRM service-order bridge', () => {
     expect(Number(after?.currentArc)).toBe(480000);
   });
 });
+
+describe('Quick disconnect (DISCONNECTION + mode=QUICK)', () => {
+  beforeEach(() => {
+    // Feature flag is opt-in; reset to a known state per test so order doesn't matter.
+    delete process.env.QUICK_DISCONNECT_ENABLED;
+    // Stub CRM out so these tests don't try to call a real CRM client.
+    process.env.CRM_SERVICE_ORDERS_ENABLED = 'false';
+  });
+
+  async function postQuick(
+    cookie: string,
+    accountId: string,
+    overrides: Partial<{ days: string; reason: string; mode: string }> = {},
+  ) {
+    return request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', accountId)
+      .field('changeType', 'DISCONNECTION')
+      .field('newArc', '0')
+      .field('effectiveDate', '2026-05-01')
+      .field('disconnectionCategoryId', 'cat-test')
+      .field('disconnectionSubCategoryId', 'sub-test')
+      .field('disconnectionMode', overrides.mode ?? 'QUICK')
+      .field('quickRequestedDays', overrides.days ?? '7')
+      .field('quickApprovalReason', overrides.reason ?? 'Customer already shut down operations.')
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf');
+  }
+
+  it('rejects mode=QUICK with 422 when QUICK_DISCONNECT_ENABLED is not true', async () => {
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({ clientName: 'X', currentArc: 120000 });
+    const res = await postQuick(cookie, acct.id);
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/QUICK_DISCONNECT_DISABLED/);
+  });
+
+  it('accepts mode=QUICK and flips the account to PENDING_QUICK_APPROVAL', async () => {
+    process.env.QUICK_DISCONNECT_ENABLED = 'true';
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({ clientName: 'X', currentArc: 120000 });
+    const res = await postQuick(cookie, acct.id, { days: '5' });
+    expect(res.status).toBe(201);
+    expect(res.body.crm).toEqual({ ok: 'pending-quick-approval' });
+
+    const after = await prisma.account.findUnique({ where: { id: acct.id } });
+    expect(after?.contractStatus).toBe('PENDING_QUICK_APPROVAL');
+
+    // Commercial change row has the quick metadata persisted.
+    const cc = await prisma.commercialChange.findFirst({
+      where: { accountId: acct.id },
+    });
+    expect(cc?.disconnectionMode).toBe('QUICK');
+    expect(cc?.quickRequestedDays).toBe(5);
+    expect(cc?.quickApprovalReason).toMatch(/Customer already shut down/);
+
+    // No CRM service-order yet — that happens later via the approval webhook.
+    expect(cc?.crmServiceOrderId).toBeNull();
+  });
+
+  it('rejects quickRequestedDays > 15 with 422', async () => {
+    process.env.QUICK_DISCONNECT_ENABLED = 'true';
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({ clientName: 'X', currentArc: 120000 });
+    const res = await postQuick(cookie, acct.id, { days: '20' });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/QUICK_DISCONNECT_INVALID_DAYS/);
+  });
+
+  it('rejects too-short quickApprovalReason with 422', async () => {
+    process.env.QUICK_DISCONNECT_ENABLED = 'true';
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({ clientName: 'X', currentArc: 120000 });
+    const res = await postQuick(cookie, acct.id, { reason: 'too short' });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toMatch(/QUICK_DISCONNECT_REASON_REQUIRED/);
+  });
+
+  it('refuses a second commercial change while account is PENDING_QUICK_APPROVAL', async () => {
+    process.env.QUICK_DISCONNECT_ENABLED = 'true';
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({ clientName: 'X', currentArc: 120000 });
+    const first = await postQuick(cookie, acct.id);
+    expect(first.status).toBe(201);
+
+    // Now try to raise any other change — must be blocked.
+    const second = await request(app)
+      .post('/commercial-changes')
+      .set('Cookie', cookie)
+      .field('accountId', acct.id)
+      .field('changeType', 'UPGRADE')
+      .field('newArc', '200000')
+      .field('effectiveDate', '2026-05-10')
+      .attach('approvalFile', PDF_BUFFER, 'approval.pdf');
+    expect(second.status).toBe(422);
+    expect(second.body.error).toMatch(/ACCOUNT_PENDING_QUICK_APPROVAL/);
+  });
+});

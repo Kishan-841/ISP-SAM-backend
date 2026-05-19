@@ -24,6 +24,11 @@ enum ContractStatus {
   /// SAM picked PROCEED on the day-21 retention prompt. 10-day window for
   /// paperwork; account is terminated on `scheduledTerminationAt`.
   DISCONNECTING
+  /// SAM raised a *quick* disconnection request (skip the 21-day retention).
+  /// Waiting on CRM Admin to APPROVE or REJECT. On APPROVE the account flips
+  /// to DISCONNECTING with `scheduledTerminationAt = now + quickRequestedDays`
+  /// (1..15). On REJECT it returns to ACTIVE.
+  PENDING_QUICK_APPROVAL
 }
 
 enum RetentionDecision {
@@ -132,6 +137,26 @@ model CommercialChange {
   disconnectionCategoryId    String?   @map("disconnection_category_id")
   disconnectionSubCategoryId String?   @map("disconnection_sub_category_id")
   disconnectionReason        String?   @map("disconnection_reason")
+
+  // ── Quick-disconnect workflow (DISCONNECTION rows only) ───────────────
+  // SAM raises a request flagged QUICK to skip the 21-day retention. CRM
+  // Admin must APPROVE before the customer is moved to DISCONNECTING.
+  /// 'NORMAL' (default) or 'QUICK'. NULL for non-disconnection rows.
+  disconnectionMode          String?   @map("disconnection_mode")
+  /// SAM's requested time-to-terminate after CRM approval. 1..15 days.
+  quickRequestedDays         Int?      @map("quick_requested_days")
+  /// Mandatory free-text justification SAM provides when raising a QUICK
+  /// request. Shown to CRM Admin verbatim on the approval queue.
+  quickApprovalReason        String?   @map("quick_approval_reason")
+  /// 'APPROVED' | 'REJECTED' | NULL (pending). Stamped by the CRM webhook
+  /// when the admin decides.
+  quickApprovalDecision      String?   @map("quick_approval_decision")
+  quickApprovalDecidedAt     DateTime? @map("quick_approval_decided_at") @db.Timestamptz(6)
+  /// Free-string CRM-side identifier (email or user id) — we don't share
+  /// a user table with CRM so we don't try to FK.
+  quickApprovalDecidedBy     String?   @map("quick_approval_decided_by")
+  /// Optional on APPROVE, mandatory on REJECT — surfaces back to SAM.
+  quickApprovalNote          String?   @map("quick_approval_note")
 
   // ── Probable-churn retention workflow (DISCONNECTION rows only) ───────
   // Day 0 (commit)  → retentionPromptDueAt = effectiveDate + 21d

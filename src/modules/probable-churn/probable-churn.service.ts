@@ -7,6 +7,9 @@ export type Requester = { id: string; role: UserRole };
 export type ProbableChurnRow = {
   commercialChangeId: string;
   effectiveDate: string;
+  /** When the commercial-change row was created. Useful for the
+   *  quick-disconnect pending section to show "raised N hours ago". */
+  raisedAt: string;
   retentionPromptDueAt: string | null;
   retentionDecision: 'RETAIN' | 'PROCEED' | null;
   retentionDecidedAt: string | null;
@@ -23,13 +26,21 @@ export type ProbableChurnRow = {
   samOwner: { id: string; name: string; email: string } | null;
   account: {
     id: string;
-    contractStatus: 'PROBABLE_CHURN' | 'DISCONNECTING';
+    /** Now includes PENDING_QUICK_APPROVAL so the UI can render quick
+     *  requests in their own section above the 21-day retention queue. */
+    contractStatus: 'PROBABLE_CHURN' | 'DISCONNECTING' | 'PENDING_QUICK_APPROVAL';
     /** Current ARC — kept on the account until day 31. Used for "at risk" totals. */
     currentArc: number;
     kittyType: 'BASE' | 'NEW';
     /** null = Excel-imported / not CRM-synced — UI hides the "sent to CRM" hint. */
     externalCrmId: string | null;
   };
+  /** 'NORMAL' or 'QUICK'. NULL on legacy rows without the column set. */
+  disconnectionMode: 'NORMAL' | 'QUICK' | null;
+  /** When mode='QUICK': 1..15 days from CRM-Admin approval to termination. */
+  quickRequestedDays: number | null;
+  /** When mode='QUICK': SAM's justification, surfaced verbatim on the UI. */
+  quickApprovalReason: string | null;
   /**
    * CRM hand-off info. Populated after SAM picks PROCEED on a CRM-synced
    * customer (externalCrmId present + CRM_SERVICE_ORDERS_ENABLED=true).
@@ -55,7 +66,7 @@ export async function listProbableChurn(
   await sweepDueTerminations();
 
   const accountWhere: Prisma.AccountWhereInput = {
-    contractStatus: { in: ['PROBABLE_CHURN', 'DISCONNECTING'] },
+    contractStatus: { in: ['PROBABLE_CHURN', 'DISCONNECTING', 'PENDING_QUICK_APPROVAL'] },
   };
   if (requester.role === 'SAM') accountWhere.samOwnerId = requester.id;
 
@@ -102,6 +113,7 @@ export async function listProbableChurn(
       return {
         commercialChangeId: c.id,
         effectiveDate: c.effectiveDate.toISOString(),
+        raisedAt: c.createdAt.toISOString(),
         retentionPromptDueAt: c.retentionPromptDueAt?.toISOString() ?? null,
         retentionDecision: c.retentionDecision,
         retentionDecidedAt: c.retentionDecidedAt?.toISOString() ?? null,
@@ -122,11 +134,17 @@ export async function listProbableChurn(
           : null,
         account: {
           id: a.id,
-          contractStatus: a.contractStatus as 'PROBABLE_CHURN' | 'DISCONNECTING',
+          contractStatus: a.contractStatus as
+            | 'PROBABLE_CHURN'
+            | 'DISCONNECTING'
+            | 'PENDING_QUICK_APPROVAL',
           currentArc: Number(a.currentArc),
           kittyType: a.kittyType,
           externalCrmId: a.externalCrmId,
         },
+        disconnectionMode: (c.disconnectionMode as 'NORMAL' | 'QUICK' | null) ?? null,
+        quickRequestedDays: c.quickRequestedDays,
+        quickApprovalReason: c.quickApprovalReason,
         crmServiceOrderId: c.crmServiceOrderId,
         crmOrderNumber: c.crmOrderNumber,
         crmStatus: c.crmStatus,
@@ -135,7 +153,11 @@ export async function listProbableChurn(
     })
     .filter((r): r is ProbableChurnRow => r !== null)
     .sort((a, b) => {
-      // Promptable rows (decision still null) bubble to the top.
+      // Quick-approval pending rises above everything — admin needs to act.
+      const aQuick = a.account.contractStatus === 'PENDING_QUICK_APPROVAL' ? 0 : 1;
+      const bQuick = b.account.contractStatus === 'PENDING_QUICK_APPROVAL' ? 0 : 1;
+      if (aQuick !== bQuick) return aQuick - bQuick;
+      // Within each bucket, promptable retention rows (decision still null) bubble up.
       const aPending = a.retentionDecision === null ? 0 : 1;
       const bPending = b.retentionDecision === null ? 0 : 1;
       if (aPending !== bPending) return aPending - bPending;

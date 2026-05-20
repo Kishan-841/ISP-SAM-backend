@@ -72,6 +72,42 @@ export type QuickDisconnectIngestResult =
   | { status: 'DUPLICATE'; eventId: string }
   | { status: 'NOT_FOUND'; eventId: string; reason: string };
 
+/** Payload of the `commercialChange.statusChanged` webhook (CRM → SAM).
+ *  Fires on EVERY workflow transition — see
+ *  docs/integrations/quick-disconnect-end-to-end-spec.md §3.2. */
+export type CommercialChangeStatusChangedPayload = {
+  eventId: string;
+  eventType: 'commercialChange.statusChanged';
+  occurredAt: string;
+  commercialChangeId: string;
+  fromStatus?: string;
+  toStatus: string;
+  changedBy: string;
+  note?: string;
+  serviceOrderId?: string;
+  serviceOrderNumber?: string;
+};
+
+export type StatusChangeIngestResult =
+  | { status: 'PROCESSED'; eventId: string; accountId: string; toStatus: string }
+  | { status: 'DUPLICATE'; eventId: string }
+  | { status: 'NOT_FOUND'; eventId: string; reason: string };
+
+/** Status strings that move the account into DISCONNECTING (workflow in flight). */
+const IN_FLIGHT_STATUSES = new Set([
+  'PENDING_DOCS_REVIEW',
+  'PENDING_NOC',
+  'PENDING_ACCOUNTS',
+  // CRM's "post-rename" enum, also in use
+  'DOCS',
+  'NOC',
+  'ACCOUNTS',
+]);
+
+/** Status strings that mean the workflow ended in rejection — revert account
+ *  to ACTIVE per spec §4.1 (Hard revert policy). */
+const REJECTION_STATUSES = new Set(['REJECTED', 'DOCS_REJECTED', 'NOC_REJECTED', 'CANCELLED']);
+
 function startOfDayUtcPlusDays(now: Date, days: number): Date {
   const out = new Date(now);
   out.setUTCHours(0, 0, 0, 0);
@@ -471,6 +507,160 @@ export const integrationsService = {
       eventId: event.id,
       accountId: change.accountId,
       decision: payload.decision,
+    };
+  },
+
+  /**
+   * Inbound `commercialChange.statusChanged` — CRM fires this on every
+   * service-order workflow transition. Source of truth for the SAM-side
+   * crm_status display, account contract status flips, and (on COMPLETED)
+   * the final termination.
+   *
+   * Per spec docs/integrations/quick-disconnect-end-to-end-spec.md §3.2.
+   * Idempotent on eventId.
+   */
+  async ingestCommercialChangeStatusChanged(
+    payload: CommercialChangeStatusChangedPayload,
+    ctx: IngestContext,
+  ): Promise<StatusChangeIngestResult> {
+    // 1. Reserve eventId via integration_events @unique → dedupe.
+    let event;
+    try {
+      event = await prisma.integrationEvent.create({
+        data: {
+          source: 'CRM',
+          eventType: payload.eventType,
+          externalEventId: payload.eventId,
+          occurredAt: new Date(payload.occurredAt),
+          status: 'FAILED',
+          payload: payload as unknown as Prisma.InputJsonValue,
+          signatureHeader: ctx.signatureHeader,
+          timestampHeader: ctx.timestampHeader,
+          remoteAddr: ctx.remoteAddr,
+        },
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const existing = await prisma.integrationEvent.findUnique({
+          where: { externalEventId: payload.eventId },
+          select: { id: true },
+        });
+        return { status: 'DUPLICATE', eventId: existing?.id ?? payload.eventId };
+      }
+      throw err;
+    }
+
+    // 2. Look up the commercial change. Unknown id = 404 (CRM marks FAILED,
+    //    no retry — investigate).
+    const change = await prisma.commercialChange.findUnique({
+      where: { id: payload.commercialChangeId },
+      include: { account: { select: { id: true, contractStatus: true } } },
+    });
+    if (!change) {
+      const reason = `Unknown commercialChangeId ${payload.commercialChangeId}`;
+      await safeUpdateStatusReason(event.id, reason);
+      return { status: 'NOT_FOUND', eventId: event.id, reason };
+    }
+
+    // 3. Apply the transition. Branching on toStatus drives both crm_status
+    //    persistence and any side-effects on the account row.
+    const decidedAt = new Date(payload.occurredAt);
+    const toStatus = payload.toStatus;
+
+    type ChangeUpdate = Prisma.CommercialChangeUpdateInput;
+    const changeUpdate: ChangeUpdate = {
+      crmStatus: toStatus,
+      crmStatusUpdatedAt: decidedAt,
+      ...(payload.serviceOrderId ? { crmServiceOrderId: payload.serviceOrderId } : {}),
+      ...(payload.serviceOrderNumber ? { crmOrderNumber: payload.serviceOrderNumber } : {}),
+    };
+    let accountUpdate: Prisma.AccountUpdateInput | null = null;
+
+    if (toStatus === 'PENDING_DOCS_REVIEW' || toStatus === 'DOCS') {
+      // This is the moment CRM admin's approval lands. For QUICK rows we
+      // also stamp the quick-approval decision metadata + scheduled
+      // termination so the SAM-side hard-termination timer kicks in.
+      changeUpdate.retentionDecision = 'PROCEED';
+      changeUpdate.retentionDecidedAt = decidedAt;
+      if (change.disconnectionMode === 'QUICK') {
+        changeUpdate.quickApprovalDecision = 'APPROVED';
+        changeUpdate.quickApprovalDecidedAt = decidedAt;
+        changeUpdate.quickApprovalDecidedBy = payload.changedBy;
+        if (payload.note) changeUpdate.quickApprovalNote = payload.note;
+        const days = change.quickRequestedDays ?? 1;
+        changeUpdate.scheduledTerminationAt = startOfDayUtcPlusDays(new Date(), days);
+      }
+      accountUpdate = { contractStatus: 'DISCONNECTING' };
+    } else if (IN_FLIGHT_STATUSES.has(toStatus)) {
+      // PENDING_NOC / PENDING_ACCOUNTS (or post-rename DOCS/NOC/ACCOUNTS) —
+      // workflow is in flight, account stays DISCONNECTING, just update
+      // crm_status for visibility.
+      if (change.account.contractStatus !== 'DISCONNECTING') {
+        accountUpdate = { contractStatus: 'DISCONNECTING' };
+      }
+    } else if (toStatus === 'COMPLETED') {
+      // Final state — terminate the account. (sweepDueTerminations would
+      // also catch this on next read, but doing it inline gives the UI an
+      // immediate reflection.)
+      accountUpdate = { contractStatus: 'TERMINATED' };
+      changeUpdate.accountAppliedAt = decidedAt;
+    } else if (REJECTION_STATUSES.has(toStatus)) {
+      // Hard revert per spec §4.1 — account back to ACTIVE.
+      if (change.disconnectionMode === 'QUICK' && toStatus === 'REJECTED') {
+        // Stage-1 reject from admin → stamp the quick-rejection metadata.
+        changeUpdate.quickApprovalDecision = 'REJECTED';
+        changeUpdate.quickApprovalDecidedAt = decidedAt;
+        changeUpdate.quickApprovalDecidedBy = payload.changedBy;
+        if (payload.note) changeUpdate.quickApprovalNote = payload.note;
+      }
+      accountUpdate = { contractStatus: 'ACTIVE' };
+    }
+    // Anything else (unknown enum) — persist the status string but don't
+    // mutate the account. Better to record an unknown than to drop it.
+
+    try {
+      const ops: Prisma.PrismaPromise<unknown>[] = [
+        prisma.commercialChange.update({ where: { id: change.id }, data: changeUpdate }),
+      ];
+      if (accountUpdate) {
+        ops.push(
+          prisma.account.update({ where: { id: change.accountId }, data: accountUpdate }),
+        );
+      }
+      await prisma.$transaction(ops);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'Apply failed';
+      await safeUpdateStatusReason(event.id, reason);
+      throw err;
+    }
+
+    await prisma.integrationEvent.update({
+      where: { id: event.id },
+      data: { status: 'PROCESSED', accountId: change.accountId, statusReason: null },
+    });
+    await prisma.auditLog.create({
+      data: {
+        entityType: 'CommercialChange',
+        entityId: change.id,
+        action: 'CRM_STATUS_CHANGED',
+        performedBy: SYSTEM_USER_ID,
+        payload: {
+          eventId: payload.eventId,
+          fromStatus: payload.fromStatus ?? null,
+          toStatus,
+          changedBy: payload.changedBy,
+          note: payload.note ?? null,
+          serviceOrderId: payload.serviceOrderId ?? null,
+          serviceOrderNumber: payload.serviceOrderNumber ?? null,
+        },
+      },
+    });
+
+    return {
+      status: 'PROCESSED',
+      eventId: event.id,
+      accountId: change.accountId,
+      toStatus,
     };
   },
 

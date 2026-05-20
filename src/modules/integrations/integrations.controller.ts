@@ -52,6 +52,27 @@ const quickDisconnectDecisionSchema = z.object({
   note: z.string().optional(),
 });
 
+// Inbound `commercialChange.statusChanged` payload — fires on every
+// service-order workflow transition. Spec:
+// docs/integrations/quick-disconnect-end-to-end-spec.md §3.2.
+const commercialChangeStatusChangedSchema = z.object({
+  eventId: z.string().uuid(),
+  eventType: z.literal('commercialChange.statusChanged'),
+  occurredAt: z
+    .string()
+    .refine((s) => !Number.isNaN(Date.parse(s)), 'Invalid occurredAt'),
+  commercialChangeId: z.string().uuid(),
+  // Status strings are free-text on our side — we store whatever CRM sends.
+  // Unknown enums fall through to the gray pill in the UI rather than 400'ing
+  // so a CRM-side rename never crashes the integration.
+  fromStatus: z.string().optional(),
+  toStatus: z.string().min(1),
+  changedBy: z.string().min(1),
+  note: z.string().optional(),
+  serviceOrderId: z.string().optional(),
+  serviceOrderNumber: z.string().optional(),
+});
+
 function ctxFromReq(req: Request) {
   const r = req as VerifiedRequest;
   return {
@@ -167,6 +188,60 @@ export const integrationsController = {
       eventId: result.eventId,
       accountId: result.accountId,
       decision: result.decision,
+    });
+  },
+
+  /**
+   * Inbound `commercialChange.statusChanged` from CRM.
+   * Fires on every service-order workflow transition. Same response codes
+   * as quickDisconnect.decided — 200/201 = processed (no retry), 400 = bad
+   * payload (no retry), 404 = unknown commercialChangeId (no retry),
+   * 5xx = transient (CRM retries).
+   */
+  async commercialChangeStatusChanged(req: Request, res: Response) {
+    const parse = commercialChangeStatusChangedSchema.safeParse(req.body);
+    if (!parse.success) {
+      const reason = parse.error.issues
+        .map((i) => `${i.path.join('.')}: ${i.message}`)
+        .join('; ');
+      const partial = req.body && typeof req.body === 'object' ? req.body : {};
+      const candidateId =
+        typeof (partial as { eventId?: unknown }).eventId === 'string'
+          ? (partial as { eventId: string }).eventId
+          : null;
+      await integrationsService.recordRejection({
+        externalEventId: candidateId,
+        eventType:
+          typeof (partial as { eventType?: unknown }).eventType === 'string'
+            ? ((partial as { eventType: string }).eventType)
+            : 'commercialChange.statusChanged',
+        occurredAt: null,
+        reason: `validation: ${reason}`,
+        payload: req.body,
+        ...ctxFromReq(req),
+      });
+      res.status(400).json({ error: 'Validation failed', detail: reason });
+      return;
+    }
+
+    const result = await integrationsService.ingestCommercialChangeStatusChanged(
+      parse.data,
+      ctxFromReq(req),
+    );
+
+    if (result.status === 'DUPLICATE') {
+      res.status(200).json({ status: 'already_processed', eventId: result.eventId, deduped: true });
+      return;
+    }
+    if (result.status === 'NOT_FOUND') {
+      res.status(404).json({ status: 'not_found', reason: result.reason });
+      return;
+    }
+    res.status(201).json({
+      status: 'processed',
+      eventId: result.eventId,
+      accountId: result.accountId,
+      toStatus: result.toStatus,
     });
   },
 

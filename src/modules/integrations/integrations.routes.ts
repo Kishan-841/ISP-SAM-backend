@@ -16,10 +16,21 @@ integrationsRouter.post(
 
 // CRM Admin's APPROVE / REJECT decision on a SAM-raised QUICK disconnect.
 // Same shared secret + signing scheme as customer.activated per contract §1.5.
+// LEGACY — kept for backward compatibility with the original gate-only model.
+// New CRM builds should fire commercialChange.statusChanged instead (per
+// docs/integrations/quick-disconnect-end-to-end-spec.md §3.4 option A).
 integrationsRouter.post(
   '/crm/quick-disconnect-decision',
   requireCrmSignature,
   integrationsController.quickDisconnectDecision,
+);
+
+// CRM service-order workflow transition (every state change). Per spec
+// docs/integrations/quick-disconnect-end-to-end-spec.md §3.2.
+integrationsRouter.post(
+  '/crm/commercial-change-status',
+  requireCrmSignature,
+  integrationsController.commercialChangeStatusChanged,
 );
 
 // Admin-only forensic log of every webhook received.
@@ -41,4 +52,9 @@ crmWebhookAliasRouter.post(
   '/crm/quick-disconnect.decided',
   requireCrmSignature,
   integrationsController.quickDisconnectDecision,
+);
+crmWebhookAliasRouter.post(
+  '/crm/commercial-change.status-changed',
+  requireCrmSignature,
+  integrationsController.commercialChangeStatusChanged,
 );

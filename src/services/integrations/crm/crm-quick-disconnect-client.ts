@@ -32,6 +32,11 @@ type PushInput = {
   /** SAM user who raised the request. */
   raisedBy: { id: string; email: string };
   reason: string;
+  /** CRM-side taxonomy slugs (e.g. 'management-call' / 'wants-single-isp').
+   *  Required by CRM's webhook receiver — they pre-populate the service-
+   *  order row with the same reason taxonomy the normal disconnect flow uses. */
+  disconnectionCategoryId: string;
+  disconnectionSubCategoryId: string;
   requested: {
     arc?: number;
     planName?: string | null;
@@ -90,6 +95,8 @@ export async function pushQuickDisconnectRequest(input: PushInput): Promise<Push
     customer: { externalId: input.externalCrmId },
     raisedBy: { id: input.raisedBy.id, email: input.raisedBy.email },
     reason: input.reason,
+    disconnectionCategoryId: input.disconnectionCategoryId,
+    disconnectionSubCategoryId: input.disconnectionSubCategoryId,
     requested: input.requested,
   };
 

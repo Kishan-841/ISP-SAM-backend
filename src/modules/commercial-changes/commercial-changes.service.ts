@@ -841,6 +841,8 @@ async function notifyCrmQuickDisconnectRequested(opts: {
     newBandwidthMbps: number | null;
     quickRequestedDays: number | null;
     quickApprovalReason: string | null;
+    disconnectionCategoryId: string | null;
+    disconnectionSubCategoryId: string | null;
   };
   account: { externalCrmId: string | null; currentArc: Prisma.Decimal; currentPlan: string | null };
   performingUser: { id: string; email: string };
@@ -865,11 +867,16 @@ async function notifyCrmQuickDisconnectRequested(opts: {
     return;
   }
 
+  // CRM requires the disconnection-reason taxonomy IDs so they can pre-
+  // populate the resulting service order. The form enforces both as required
+  // on commit; the `?? ''` fallback is defensive against legacy rows.
   const result = await pushQuickDisconnectRequest({
     commercialChangeId: cc.id,
     externalCrmId: account.externalCrmId,
     raisedBy: { id: performingUser.id, email: performingUser.email },
     reason: cc.quickApprovalReason ?? '(no reason provided)',
+    disconnectionCategoryId: cc.disconnectionCategoryId ?? '',
+    disconnectionSubCategoryId: cc.disconnectionSubCategoryId ?? '',
     requested: {
       arc: Number(account.currentArc),
       planName: account.currentPlan ?? undefined,

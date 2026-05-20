@@ -29,3 +29,16 @@ integrationsRouter.get(
   requireRole('ADMIN'),
   integrationsController.listEvents,
 );
+
+/**
+ * Alias router mounted at /webhooks. Exists so the CRM team can configure
+ * SAM_WEBHOOK_URL with the contract's suggested path
+ * (/webhooks/crm/quick-disconnect.decided) without needing to know our
+ * internal /integrations layout. Same handler as the SAM-native route.
+ */
+export const crmWebhookAliasRouter = Router();
+crmWebhookAliasRouter.post(
+  '/crm/quick-disconnect.decided',
+  requireCrmSignature,
+  integrationsController.quickDisconnectDecision,
+);

@@ -6,7 +6,10 @@ import { auditRouter } from './modules/audit/audit.routes.js';
 import { authRouter } from './modules/auth/auth.routes.js';
 import { commercialChangesRouter } from './modules/commercial-changes/commercial-changes.routes.js';
 import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
-import { integrationsRouter } from './modules/integrations/integrations.routes.js';
+import {
+  integrationsRouter,
+  crmWebhookAliasRouter,
+} from './modules/integrations/integrations.routes.js';
 import { meetingsRouter } from './modules/meetings/meetings.routes.js';
 import { notificationsRouter } from './modules/notifications/notifications.routes.js';
 import { probableChurnRouter } from './modules/probable-churn/probable-churn.routes.js';
@@ -40,6 +43,11 @@ app.use('/notifications', notificationsRouter);
 app.use('/probable-churn', probableChurnRouter);
 // Public endpoint — auth is enforced inside the router via HMAC, not JWT.
 app.use('/integrations', integrationsRouter);
+// Alias matching the contract's suggested path so the CRM team can configure
+// SAM_WEBHOOK_URL with either /integrations/crm/quick-disconnect-decision
+// (SAM-native) or /webhooks/crm/quick-disconnect.decided (contract suggestion).
+// Both routes hit the same handler.
+app.use('/webhooks', crmWebhookAliasRouter);
 app.use(errorHandler);
 
 if (import.meta.url === `file://${process.argv[1]}`) {

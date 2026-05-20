@@ -1,6 +1,11 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../prisma.js';
 import { sendCustomerActivatedAlert } from '../../services/email/notifications.service.js';
+import {
+  getCrmClient,
+  CrmHttpError,
+} from '../../services/integrations/crm/index.js';
+import { lookupDisconnectionLabels } from '../commercial-changes/disconnection-reasons.js';
 
 /** UUID stamped on audit rows for events that don't have a real user actor
  *  (CRM webhooks). Doesn't need to point at an existing user — audit_logs
@@ -314,9 +319,17 @@ export const integrationsService = {
 
     // 2. Look up the commercial change. Unknown id = 404 so CRM marks the
     //    delivery FAILED (won't retry) and an operator can investigate.
+    //    We pull all the fields needed to (a) decide the new state and
+    //    (b) on APPROVE, raise the CRM /service-orders so the docs → NOC →
+    //    accounts → completed workflow kicks in — mirrors what the normal
+    //    retentionDecision('PROCEED') path does in commercial-changes.
     const change = await prisma.commercialChange.findUnique({
       where: { id: payload.commercialChangeId },
-      include: { account: { select: { id: true, contractStatus: true } } },
+      include: {
+        account: {
+          select: { id: true, contractStatus: true, externalCrmId: true },
+        },
+      },
     });
     if (!change) {
       const reason = `Unknown commercialChangeId ${payload.commercialChangeId}`;
@@ -333,23 +346,58 @@ export const integrationsService = {
 
     // 3. Apply the decision. Both branches stamp the decision metadata on
     //    the commercial-change row, then mutate the account state.
+    let crmRaiseSummary: {
+      crmServiceOrderId: string | null;
+      crmOrderNumber: string | null;
+      crmStatus: string | null;
+      crmError: string | null;
+    } = {
+      crmServiceOrderId: null,
+      crmOrderNumber: null,
+      crmStatus: null,
+      crmError: null,
+    };
     try {
       if (payload.decision === 'APPROVE') {
+        const decidedAt = new Date(payload.occurredAt);
         const days = change.quickRequestedDays ?? 1;
         const scheduledTerminationAt = startOfDayUtcPlusDays(new Date(), days);
+
+        // Raise the CRM service order so the docs → NOC → SAM activation →
+        // accounts → completed workflow tracks the actual disconnection on
+        // the CRM side. Same call the normal PROCEED path uses
+        // (commercial-changes.service.ts retentionDecision PROCEED branch).
+        // If CRM rejects we capture the error but still advance SAM-side
+        // state — the operator can chase the CRM hand-off separately.
+        crmRaiseSummary = await raiseDisconnectionServiceOrder(change);
+
         await prisma.$transaction([
           prisma.commercialChange.update({
             where: { id: change.id },
             data: {
               quickApprovalDecision: 'APPROVED',
-              quickApprovalDecidedAt: new Date(payload.occurredAt),
+              quickApprovalDecidedAt: decidedAt,
               quickApprovalDecidedBy: payload.decidedBy,
               quickApprovalNote: payload.note ?? null,
               scheduledTerminationAt,
-              // Mark as "decision applied to account" so the dashboard
-              // counts/sweep treat this as in-flight.
+              // Mark as "decision applied" so the dashboard counts and the
+              // sweepDueTerminations() reader treat this as in-flight.
               retentionDecision: 'PROCEED',
-              retentionDecidedAt: new Date(payload.occurredAt),
+              retentionDecidedAt: decidedAt,
+              // CRM service-order linkage (null on failure / Excel-imported).
+              ...(crmRaiseSummary.crmServiceOrderId
+                ? {
+                    crmServiceOrderId: crmRaiseSummary.crmServiceOrderId,
+                    crmOrderNumber: crmRaiseSummary.crmOrderNumber,
+                    crmStatus: crmRaiseSummary.crmStatus,
+                    crmStatusUpdatedAt: decidedAt,
+                  }
+                : crmRaiseSummary.crmStatus
+                  ? {
+                      crmStatus: crmRaiseSummary.crmStatus,
+                      crmStatusUpdatedAt: decidedAt,
+                    }
+                  : {}),
             },
           }),
           prisma.account.update({
@@ -403,6 +451,17 @@ export const integrationsService = {
           eventId: payload.eventId,
           decidedBy: payload.decidedBy,
           note: payload.note ?? null,
+          // Capture the CRM service-order outcome on APPROVE so the audit
+          // row tells the full story without needing to cross-reference
+          // commercial_changes.crm_status.
+          ...(payload.decision === 'APPROVE'
+            ? {
+                crmServiceOrderId: crmRaiseSummary.crmServiceOrderId,
+                crmOrderNumber: crmRaiseSummary.crmOrderNumber,
+                crmStatus: crmRaiseSummary.crmStatus,
+                crmError: crmRaiseSummary.crmError,
+              }
+            : {}),
         },
       },
     });
@@ -522,5 +581,99 @@ async function safeUpdateStatusReason(eventId: string, reason: string) {
     });
   } catch {
     // Intentionally silent — caller is mid-error and re-throwing.
+  }
+}
+
+/**
+ * Raise the CRM DISCONNECTION service order so the docs → NOC → SAM
+ * activation → accounts → completed workflow kicks in on CRM side. Mirrors
+ * the same call the normal retentionDecision('PROCEED') path makes in
+ * commercial-changes.service.ts — kept inline (rather than refactored into
+ * a shared helper) for now since the two callers have different transaction
+ * boundaries.
+ *
+ * Never throws — failure is captured so the caller can persist crm_status=
+ * 'FAILED' and surface the error in the audit row. SAM-side state advances
+ * regardless; the operator chases the CRM hand-off from the integrations
+ * log.
+ *
+ * Returns nulls + crmStatus='FAILED' on error, or nulls all the way through
+ * when the kill-switch is off or the account has no externalCrmId
+ * (Excel-imported leads don't have a CRM lead to raise an order against).
+ */
+async function raiseDisconnectionServiceOrder(change: {
+  id: string;
+  disconnectionCategoryId: string | null;
+  disconnectionSubCategoryId: string | null;
+  disconnectionReason: string | null;
+  approvalFileUrl: string | null;
+  poFileUrl: string | null;
+  mailReceivedDate: Date | null;
+  account: { externalCrmId: string | null };
+}): Promise<{
+  crmServiceOrderId: string | null;
+  crmOrderNumber: string | null;
+  crmStatus: string | null;
+  crmError: string | null;
+}> {
+  const empty = {
+    crmServiceOrderId: null,
+    crmOrderNumber: null,
+    crmStatus: null,
+    crmError: null,
+  };
+
+  if (process.env.CRM_SERVICE_ORDERS_ENABLED !== 'true') return empty;
+  if (!change.account.externalCrmId) return empty;
+
+  const labels = lookupDisconnectionLabels(
+    change.disconnectionCategoryId,
+    change.disconnectionSubCategoryId,
+  );
+  const samRef = `SAM-${change.id.slice(0, 8).toUpperCase()}`;
+  const noteParts: string[] = [samRef, 'QUICK disconnect — CRM Admin approved'];
+  if (labels.category) {
+    noteParts.push(
+      `Reason: ${labels.category}${labels.subCategory ? ` — ${labels.subCategory}` : ''}`,
+    );
+  }
+  if (change.disconnectionReason) noteParts.push(`Details: ${change.disconnectionReason}`);
+
+  try {
+    const order = await getCrmClient().createServiceOrder({
+      customerId: change.account.externalCrmId,
+      orderType: 'DISCONNECTION',
+      disconnectionCategoryId: change.disconnectionCategoryId ?? undefined,
+      disconnectionSubCategoryId: change.disconnectionSubCategoryId ?? undefined,
+      disconnectionReason: change.disconnectionReason ?? undefined,
+      approvalFileUrl: change.approvalFileUrl ?? undefined,
+      poFileUrl: change.poFileUrl ?? undefined,
+      mailReceivedDate: change.mailReceivedDate?.toISOString().slice(0, 10) ?? undefined,
+      notes: noteParts.join(' | '),
+    });
+    return {
+      crmServiceOrderId: order.id,
+      crmOrderNumber: order.orderNumber,
+      crmStatus: order.status,
+      crmError: null,
+    };
+  } catch (err) {
+    const crmError =
+      err instanceof CrmHttpError
+        ? `CRM ${err.statusCode}: ${err.message}`
+        : err instanceof Error
+          ? err.message
+          : 'CRM call failed';
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[ingestQuickDisconnectDecision ${change.id}] CRM service-order failed:`,
+      crmError,
+    );
+    return {
+      crmServiceOrderId: null,
+      crmOrderNumber: null,
+      crmStatus: 'FAILED',
+      crmError,
+    };
   }
 }

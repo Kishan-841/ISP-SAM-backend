@@ -33,6 +33,15 @@ integrationsRouter.post(
   integrationsController.commercialChangeStatusChanged,
 );
 
+// Single-URL dispatcher — CRM can POST any event type here and we route
+// by body.eventType. Saves them from configuring a new per-event URL
+// every time we add an event. Recommended SAM_WEBHOOK_URL going forward.
+integrationsRouter.post(
+  '/crm/event',
+  requireCrmSignature,
+  integrationsController.dispatch,
+);
+
 // Admin-only forensic log of every webhook received.
 integrationsRouter.get(
   '/events',
@@ -57,4 +66,10 @@ crmWebhookAliasRouter.post(
   '/crm/commercial-change.status-changed',
   requireCrmSignature,
   integrationsController.commercialChangeStatusChanged,
+);
+// Single-URL dispatcher alias (matches the contract path convention).
+crmWebhookAliasRouter.post(
+  '/crm/event',
+  requireCrmSignature,
+  integrationsController.dispatch,
 );

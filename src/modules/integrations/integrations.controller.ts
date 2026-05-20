@@ -82,7 +82,56 @@ function ctxFromReq(req: Request) {
   };
 }
 
+const SUPPORTED_EVENT_TYPES = [
+  'customer.activated',
+  'quickDisconnect.decided',
+  'commercialChange.statusChanged',
+] as const;
+
 export const integrationsController = {
+  /**
+   * Single-URL dispatcher — peeks at body.eventType and routes to the
+   * matching handler. Lets the CRM team configure ONE SAM_WEBHOOK_URL on
+   * their side and stop adding a new per-event override every time we
+   * agree on a new event. Signature check has already run upstream
+   * (verifyCrmWebhook middleware on the route).
+   */
+  async dispatch(req: Request, res: Response) {
+    const eventType =
+      typeof req.body?.eventType === 'string' ? req.body.eventType : '';
+    switch (eventType) {
+      case 'customer.activated':
+        return integrationsController.customerActivated(req, res);
+      case 'quickDisconnect.decided':
+        return integrationsController.quickDisconnectDecision(req, res);
+      case 'commercialChange.statusChanged':
+        return integrationsController.commercialChangeStatusChanged(req, res);
+      default: {
+        // Unknown eventType — record the rejection for forensics so the
+        // /integrations admin page shows what landed and why we didn't
+        // process it. Then 400 — fix the payload, don't retry.
+        const partial = req.body && typeof req.body === 'object' ? req.body : {};
+        const candidateId =
+          typeof (partial as { eventId?: unknown }).eventId === 'string'
+            ? (partial as { eventId: string }).eventId
+            : null;
+        await integrationsService.recordRejection({
+          externalEventId: candidateId,
+          eventType: eventType || 'unknown',
+          occurredAt: null,
+          reason: `dispatcher: unknown eventType '${eventType}'`,
+          payload: req.body,
+          ...ctxFromReq(req),
+        });
+        res.status(400).json({
+          error: `Unknown eventType: '${eventType}'`,
+          supportedEventTypes: SUPPORTED_EVENT_TYPES,
+        });
+        return;
+      }
+    }
+  },
+
   async customerActivated(req: Request, res: Response) {
     const parse = customerActivatedSchema.safeParse(req.body);
     if (!parse.success) {

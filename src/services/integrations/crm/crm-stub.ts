@@ -4,6 +4,9 @@ import {
   type CreateServiceOrderInput,
   type ServiceOrder,
   type DisconnectionCategory,
+  type BdmAssignable,
+  type CreateLeadInput,
+  type CreatedLead,
 } from './crm-client.js';
 
 /**
@@ -80,5 +83,41 @@ export class CrmStub implements CrmClient {
 
   async fetchDisconnectionReasons(): Promise<DisconnectionCategory[]> {
     return this.disconnectionReasons;
+  }
+
+  // ─── Create-lead-from-SAM stubs ───────────────────────────────────────
+  // Used by tests + the local-dev fallback so the UI works without a
+  // running CRM. Seed with `seedBdms()` if a test needs specific values.
+
+  bdms: BdmAssignable[] = [
+    { id: 'bdm-tl-1', name: 'Rahul Mehta', email: 'rahul@gazonindia.com', type: 'TEAM_LEADER' },
+    { id: 'bdm-tl-2', name: 'Priya Nair', type: 'TEAM_LEADER' },
+    { id: 'bdm-solo-1', name: 'Kunal Patel', email: 'kunal@gazonindia.com', type: 'SOLO_BDM' },
+  ];
+  /** Captures what was sent to createLead so tests can assert on it. */
+  createdLeads: Array<{ input: CreateLeadInput; response: CreatedLead }> = [];
+
+  seedBdms(bdms: BdmAssignable[]): void {
+    this.bdms = bdms;
+  }
+
+  async listAssignableBdms(): Promise<BdmAssignable[]> {
+    return this.bdms;
+  }
+
+  async createLead(input: CreateLeadInput): Promise<CreatedLead> {
+    // Honour dedupe semantics so callers can exercise the idempotent path.
+    const existing = this.createdLeads.find((r) => r.input.samLeadId === input.samLeadId);
+    if (existing) return { ...existing.response, deduped: true };
+    const response: CreatedLead = {
+      id: `crm-lead-${this.createdLeads.length + 1}`,
+      leadNumber: `GAZ-${String(1000 + this.createdLeads.length).padStart(4, '0')}`,
+      assignedToUserId: input.assignedTo.userId,
+      assignedToName:
+        this.bdms.find((b) => b.id === input.assignedTo.userId)?.name ?? 'Unknown BDM',
+      createdAt: new Date().toISOString(),
+    };
+    this.createdLeads.push({ input, response });
+    return response;
   }
 }

@@ -45,5 +45,9 @@ export type {
   ServiceOrder,
   ServiceOrderType,
   DisconnectionCategory,
+  BdmAssignable,
+  BdmType,
+  CreateLeadInput,
+  CreatedLead,
 } from './crm-client.js';
 export { CrmHttpError } from './crm-client.js';

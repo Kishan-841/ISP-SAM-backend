@@ -71,6 +71,49 @@ export interface DisconnectionCategory {
   subCategories: { id: string; name: string; isActive: boolean }[];
 }
 
+// ─── Create-lead-from-SAM types (CRM contract §2) ───────────────────────────
+
+export type BdmType = 'TEAM_LEADER' | 'SOLO_BDM';
+
+/** One row from GET /api/integrations/sam/bdms. `email` may be omitted or
+ *  null when CRM doesn't have one — UI degrades gracefully (name-only). */
+export interface BdmAssignable {
+  id: string;
+  name: string;
+  email?: string | null;
+  type: BdmType;
+}
+
+export interface CreateLeadInput {
+  samLeadId: string;
+  assignedTo: { userId: string; userType?: BdmType };
+  lead: {
+    companyName: string;
+    contactName: string;
+    phone: string;
+    email?: string;
+    designation?: string;
+    industry?: string;
+    city?: string;
+    notes?: string;
+  };
+  source: {
+    system: 'SAM';
+    createdBy: { id: string; name: string; email: string };
+    createdAt: string; // ISO
+  };
+}
+
+export interface CreatedLead {
+  id: string;
+  leadNumber: string;
+  assignedToUserId: string;
+  assignedToName: string;
+  createdAt: string;
+  /** True only on idempotent replay — CRM returned 200 instead of 201. */
+  deduped?: boolean;
+}
+
 export class CrmHttpError extends Error {
   constructor(
     public statusCode: number,
@@ -92,9 +135,12 @@ export interface CrmClient {
   // Existing — used by the customer.activated bridge.
   fetchAccount(externalCrmId: string): Promise<CrmAccount | null>;
   listAccountsModifiedSince(since: Date): Promise<CrmAccount[]>;
-  // New — service orders.
+  // Service orders.
   createServiceOrder(input: CreateServiceOrderInput): Promise<ServiceOrder>;
   listServiceOrders(filters: { customerId: string }): Promise<ServiceOrder[]>;
   setActivationDate(orderId: string, activationDate: Date): Promise<ServiceOrder>;
   fetchDisconnectionReasons(): Promise<DisconnectionCategory[]>;
+  // Create-lead-from-SAM (CRM endpoints per sam-creates-lead-spec.md §2).
+  listAssignableBdms(): Promise<BdmAssignable[]>;
+  createLead(input: CreateLeadInput): Promise<CreatedLead>;
 }

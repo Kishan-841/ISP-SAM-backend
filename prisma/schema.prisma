@@ -183,6 +183,53 @@ model CommercialChange {
   @@map("commercial_changes")
 }
 
+/// SAM operator created a lead and dispatched it to CRM for assignment to
+/// a BDM (Team Leader or Solo BDM). One row per dispatch attempt, regardless
+/// of outcome — populates the "Leads I created" history view + audit trail.
+/// CRM dedupes on `samLeadId` so a double-click on Submit doesn't create two
+/// leads on their side; SAM still stamps two rows here for forensics.
+model SamLeadDispatch {
+  id        String   @id @default(uuid()) @db.Uuid
+  /// SAM-generated UUID sent to CRM for idempotency. Unique on the dispatch
+  /// table so we can detect (and short-circuit) accidental re-submits.
+  samLeadId String   @unique @map("sam_lead_id") @db.Uuid
+
+  // Form snapshot — kept on the row so the history view doesn't need CRM
+  // (or doesn't need an extra CRM round-trip).
+  companyName String  @map("company_name")
+  contactName String  @map("contact_name")
+  phone       String
+  email       String?
+  designation String?
+  industry    String?
+  city        String?
+  notes       String?
+
+  // Assignment — denormalised for display in history without re-fetching BDMs.
+  assignedToUserId String @map("assigned_to_user_id")
+  assignedToName   String @map("assigned_to_name")
+  /// 'TEAM_LEADER' | 'SOLO_BDM' — kept as free string per the CRM contract
+  /// (their enum strings could change; we just echo what they sent).
+  assignedToType   String @map("assigned_to_type")
+
+  // CRM-side response — populated on SENT, null on FAILED.
+  crmLeadId     String? @map("crm_lead_id")
+  crmLeadNumber String? @map("crm_lead_number")
+
+  /// 'SENT' (CRM accepted), 'DEDUPED' (CRM saw the samLeadId before),
+  /// 'FAILED' (CRM rejected — see errorReason).
+  status      String
+  errorReason String? @map("error_reason")
+
+  createdBy User     @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  createdById String  @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([createdById])
+  @@index([createdAt])
+  @@map("sam_lead_dispatches")
+}
+
 model Meeting {
   id                 String       @id @default(uuid()) @db.Uuid
   accountId          String       @map("account_id") @db.Uuid
@@ -290,6 +337,7 @@ model User {
 
   ownedAccounts      Account[]           @relation("SamOwner")
   notificationStates NotificationState[]
+  samLeadDispatches  SamLeadDispatch[]
 
   @@map("users")
 }

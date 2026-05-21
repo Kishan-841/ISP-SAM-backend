@@ -4,6 +4,9 @@ import {
   type CreateServiceOrderInput,
   type ServiceOrder,
   type DisconnectionCategory,
+  type BdmAssignable,
+  type CreateLeadInput,
+  type CreatedLead,
   CrmHttpError,
 } from './crm-client.js';
 
@@ -74,6 +77,24 @@ export class CrmHttpClient implements CrmClient {
       'data',
       'items',
     ]);
+  }
+
+  async listAssignableBdms(): Promise<BdmAssignable[]> {
+    const body = await this.request<unknown>('GET', '/integrations/sam/bdms');
+    return extractArray<BdmAssignable>(body, ['bdms', 'data', 'items']);
+  }
+
+  async createLead(input: CreateLeadInput): Promise<CreatedLead> {
+    // CRM may return either 201 (created) or 200 (idempotent replay with
+    // `deduped: true`). Both shapes carry the lead under `lead`. The HTTP
+    // request helper throws on non-2xx so by the time we get here it's
+    // one of those two; we don't need to branch.
+    const body = await this.request<{
+      lead: CreatedLead;
+      samLeadId?: string;
+      deduped?: boolean;
+    }>('POST', '/integrations/sam/leads', input);
+    return { ...body.lead, deduped: body.deduped === true };
   }
 
   // ─── internals ─────────────────────────────────────────────────────────

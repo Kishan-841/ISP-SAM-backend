@@ -10,6 +10,7 @@ import {
   integrationsRouter,
   crmWebhookAliasRouter,
 } from './modules/integrations/integrations.routes.js';
+import { leadsRouter } from './modules/leads/leads.routes.js';
 import { meetingsRouter } from './modules/meetings/meetings.routes.js';
 import { notificationsRouter } from './modules/notifications/notifications.routes.js';
 import { probableChurnRouter } from './modules/probable-churn/probable-churn.routes.js';
@@ -38,6 +39,7 @@ app.use('/users', usersRouter);
 app.use('/accounts', accountsRouter);
 app.use('/audit-logs', auditRouter);
 app.use('/commercial-changes', commercialChangesRouter);
+app.use('/leads', leadsRouter);
 app.use('/meetings', meetingsRouter);
 app.use('/notifications', notificationsRouter);
 app.use('/probable-churn', probableChurnRouter);

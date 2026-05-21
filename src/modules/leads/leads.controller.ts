@@ -138,7 +138,8 @@ export const leadsController = {
 
   /**
    * GET /leads/dispatches — the "Leads I created" history view. SAM sees
-   * their own; SAM_HEAD / ADMIN see everyone's.
+   * their own; SAM_HEAD / ADMIN see everyone's. Raw dispatch rows; no
+   * CRM enrichment.
    */
   async listDispatches(req: AuthedRequest, res: Response) {
     const user = requireUser(req, res);
@@ -149,5 +150,21 @@ export const leadsController = {
       limit: Number.isFinite(limit) ? limit : 50,
     });
     res.json({ dispatches });
+  },
+
+  /**
+   * GET /leads/my — the "My Leads" page data. Local dispatch rows joined
+   * with current CRM owner + stage. Used by the SAM frontend's history
+   * view. Same role scoping as listDispatches.
+   */
+  async listMyLeads(req: AuthedRequest, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const limit = req.query.limit ? Math.min(Number(req.query.limit), 200) : 50;
+    const result = await leadsService.listWithLiveStatus({
+      requester: user,
+      limit: Number.isFinite(limit) ? limit : 50,
+    });
+    res.json(result);
   },
 };

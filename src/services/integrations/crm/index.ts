@@ -49,5 +49,7 @@ export type {
   BdmType,
   CreateLeadInput,
   CreatedLead,
+  ListSamLeadsResponse,
+  SamSourcedLead,
 } from './crm-client.js';
 export { CrmHttpError } from './crm-client.js';

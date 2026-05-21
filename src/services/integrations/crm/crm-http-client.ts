@@ -7,6 +7,7 @@ import {
   type BdmAssignable,
   type CreateLeadInput,
   type CreatedLead,
+  type ListSamLeadsResponse,
   CrmHttpError,
 } from './crm-client.js';
 
@@ -95,6 +96,22 @@ export class CrmHttpClient implements CrmClient {
       deduped?: boolean;
     }>('POST', '/integrations/sam/leads', input);
     return { ...body.lead, deduped: body.deduped === true };
+  }
+
+  async listSamLeads(filters: {
+    samCreatedById?: string;
+    limit?: number;
+    page?: number;
+  }): Promise<ListSamLeadsResponse> {
+    const params = new URLSearchParams();
+    if (filters.samCreatedById) params.set('samCreatedById', filters.samCreatedById);
+    if (filters.limit != null) params.set('limit', String(filters.limit));
+    if (filters.page != null) params.set('page', String(filters.page));
+    const qs = params.toString();
+    return this.request<ListSamLeadsResponse>(
+      'GET',
+      `/integrations/sam/leads${qs ? `?${qs}` : ''}`,
+    );
   }
 
   // ─── internals ─────────────────────────────────────────────────────────

@@ -114,6 +114,37 @@ export interface CreatedLead {
   deduped?: boolean;
 }
 
+/** Row returned by GET /api/integrations/sam/leads (spec §2.3).
+ *  Lets SAM render the "Leads I created" view — who currently owns each
+ *  lead + the current CRM stage. */
+export interface SamSourcedLead {
+  id: string;
+  leadNumber: string;
+  samLeadId: string;
+  companyName: string;
+  contactName: string;
+  phone: string;
+  email: string | null;
+  status: string;
+  currentOwner: {
+    id: string;
+    name: string;
+    email?: string | null;
+    type: BdmType;
+  };
+  samCreatedById: string;
+  samCreatedByName: string;
+  samCreatedAt: string;
+  lastUpdatedAt: string;
+}
+
+export interface ListSamLeadsResponse {
+  leads: SamSourcedLead[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 export class CrmHttpError extends Error {
   constructor(
     public statusCode: number,
@@ -143,4 +174,11 @@ export interface CrmClient {
   // Create-lead-from-SAM (CRM endpoints per sam-creates-lead-spec.md §2).
   listAssignableBdms(): Promise<BdmAssignable[]>;
   createLead(input: CreateLeadInput): Promise<CreatedLead>;
+  /** GET /api/integrations/sam/leads — list view with current CRM-side
+   *  status + current owner per SAM-sourced lead. Per spec §2.3. */
+  listSamLeads(filters: {
+    samCreatedById?: string;
+    limit?: number;
+    page?: number;
+  }): Promise<ListSamLeadsResponse>;
 }

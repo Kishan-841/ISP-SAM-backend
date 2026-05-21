@@ -7,6 +7,8 @@ import {
   type BdmAssignable,
   type CreateLeadInput,
   type CreatedLead,
+  type ListSamLeadsResponse,
+  type SamSourcedLead,
 } from './crm-client.js';
 
 /**
@@ -119,5 +121,49 @@ export class CrmStub implements CrmClient {
     };
     this.createdLeads.push({ input, response });
     return response;
+  }
+
+  async listSamLeads(filters: {
+    samCreatedById?: string;
+    limit?: number;
+    page?: number;
+  }): Promise<ListSamLeadsResponse> {
+    // Reconstruct from createdLeads + bdms. Useful for tests + local dev
+    // when the CRM-side endpoint hasn't shipped yet — gives the SAM "My
+    // Leads" page something to render against.
+    const leads: SamSourcedLead[] = this.createdLeads
+      .filter(
+        (r) =>
+          !filters.samCreatedById ||
+          r.input.source.createdBy.id === filters.samCreatedById,
+      )
+      .map((r) => {
+        const bdm = this.bdms.find((b) => b.id === r.input.assignedTo.userId);
+        return {
+          id: r.response.id,
+          leadNumber: r.response.leadNumber,
+          samLeadId: r.input.samLeadId,
+          companyName: r.input.lead.companyName,
+          contactName: r.input.lead.contactName,
+          phone: r.input.lead.phone,
+          email: r.input.lead.email ?? null,
+          // Stub status — real CRM would return CRM-side stage enum.
+          status: 'NEW',
+          currentOwner: {
+            id: r.input.assignedTo.userId,
+            name: bdm?.name ?? 'Unknown',
+            email: bdm?.email ?? null,
+            type: bdm?.type ?? 'SOLO_BDM',
+          },
+          samCreatedById: r.input.source.createdBy.id,
+          samCreatedByName: r.input.source.createdBy.name,
+          samCreatedAt: r.input.source.createdAt,
+          lastUpdatedAt: r.response.createdAt,
+        };
+      });
+    const limit = filters.limit ?? 50;
+    const page = filters.page ?? 1;
+    const slice = leads.slice((page - 1) * limit, page * limit);
+    return { leads: slice, total: leads.length, page, pageSize: limit };
   }
 }

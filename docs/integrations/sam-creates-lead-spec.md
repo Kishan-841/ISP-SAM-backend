@@ -174,6 +174,84 @@ SAM stores both `id` (UUID) and `leadNumber` (GAZ-style display ref) on its own 
 | `422` | Business-rule failure (e.g. BDM is inactive, phone conflicts with another lead) | Surface the message verbatim |
 | `5xx` | Transient | Show "Couldn't reach CRM, try again" — SAM does NOT auto-retry (user is waiting; let them retry) |
 
+### 2.3 `GET /api/integrations/sam/leads` (Phase 2 — needed for "Leads I created" view)
+
+After a SAM operator creates a lead, they need to see what happened to it — at minimum, **which BDM currently owns it** (the lead might get reassigned on CRM side from one BDM to another, or escalated to a Team Leader). SAM_HEAD / ADMIN need the same view across the whole team for oversight.
+
+The simplest path: SAM polls this endpoint when the operator opens the "My Leads" page. No webhook required — polling on page-open is fine for an internal tool.
+
+**Endpoint:**
+
+```
+GET /api/integrations/sam/leads
+```
+
+**Auth:** same SAM-service JWT as the other two endpoints. No new auth.
+
+**Query parameters:**
+
+| Param | Type | Required | Notes |
+|---|---|---|---|
+| `samCreatedById` | string (SAM user UUID) | optional | Filter to leads created by one specific SAM operator. SAM passes their own user id when rendering the operator's personal "My Leads" view; omits it for the SAM_HEAD / ADMIN "all SAM leads" view. |
+| `limit` | integer | optional, default 50, max 200 | Page size |
+| `page` | integer | optional, default 1 | 1-indexed |
+
+**Response — 200 OK:**
+
+```json
+{
+  "leads": [
+    {
+      "id": "<crm-lead-uuid>",
+      "leadNumber": "GAZ-1234",
+      "samLeadId": "<sam-uuid we sent on create>",
+      "companyName": "Acme Corp",
+      "contactName": "John Doe",
+      "phone": "9876543210",
+      "email": "john@acme.com",
+      "status": "QUALIFIED",
+      "currentOwner": {
+        "id": "<crm-user-uuid>",
+        "name": "Rahul Mehta",
+        "email": "rahul@gazonindia.com",
+        "type": "TEAM_LEADER"
+      },
+      "samCreatedById": "<sam-user-uuid>",
+      "samCreatedByName": "Kishan Sapariya",
+      "samCreatedAt": "2026-05-21T06:30:00.000Z",
+      "lastUpdatedAt": "2026-05-22T09:12:34.000Z"
+    }
+  ],
+  "total": 42,
+  "page": 1,
+  "pageSize": 50
+}
+```
+
+**Field semantics:**
+
+| Field | Required | Notes |
+|---|---|---|
+| `id` / `leadNumber` | ✅ | CRM-side identifiers (so SAM can deep-link to CRM if you ever want a "View in CRM" button). |
+| `samLeadId` | ✅ | The UUID SAM sent in §2.2. SAM joins on this to its local dispatch row. |
+| `companyName` / `contactName` / `phone` / `email` | ✅ | The lead fields as they currently exist on CRM (may have been edited by the BDM). Send `email` as `null` when CRM doesn't have one. |
+| `status` | ✅ | CRM's current lead stage as a free string (e.g. `"NEW"`, `"CONTACTED"`, `"QUALIFIED"`, `"NEGOTIATING"`, `"WON"`, `"LOST"`). SAM displays as a coloured pill — unknown values render gray. |
+| `currentOwner.{id,name,email,type}` | ✅ on `id` + `name` + `type`; optional on `email` | **The key field for this whole view.** Tells SAM operators "this lead is now sitting in `<name>`'s queue" — which may differ from the original `assignedTo` if the BDM team reassigned it. Same shape as `BdmAssignable` from §2.1. |
+| `samCreatedById` / `samCreatedByName` | ✅ | Which SAM operator originally created the lead. SAM_HEAD/ADMIN view shows this; the "My Leads" filter uses it. |
+| `samCreatedAt` | ✅ | When SAM raised it. |
+| `lastUpdatedAt` | ✅ | Most recent change on CRM side (stage transition, reassignment, note added, etc.). Used to sort the list "most-recently-active first" by default. |
+
+**Error responses:**
+
+| Code | Meaning |
+|---|---|
+| `200` with empty `leads` array | SAM operator hasn't created any leads yet — render the empty state |
+| `400` | Bad query param (e.g. non-integer `limit`) |
+| `401` | JWT expired → SAM re-logs and retries |
+| `5xx` | Transient → SAM shows "Couldn't load. Retry?" |
+
+**Privacy note:** since the response carries SAM-operator identity (`samCreatedById/Name`), the JWT used must be the SAM-service-user — same as the other two endpoints. CRM doesn't enforce per-operator scoping; SAM's frontend scopes via the `samCreatedById` query param.
+
 ---
 
 ## 3. What CRM stores on the Lead row

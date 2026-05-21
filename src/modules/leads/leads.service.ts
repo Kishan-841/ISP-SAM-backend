@@ -6,6 +6,7 @@ import {
   CrmHttpError,
   type BdmAssignable,
   type CreateLeadInput,
+  type SamSourcedLead,
 } from '../../services/integrations/crm/index.js';
 
 export type LeadFormInput = {
@@ -205,6 +206,124 @@ export const leadsService = {
       },
     });
   },
+
+  /**
+   * Enriched view for the "My Leads" page — local dispatch rows joined
+   * with the current owner / status pulled from CRM. SAM operator sees
+   * their own; SAM_HEAD / ADMIN see all SAM-sourced leads across the team.
+   *
+   * Graceful degradation when CRM's listSamLeads endpoint isn't live yet:
+   * we still return the local dispatch data with `currentOwner` falling
+   * back to the original assignment and `status` set to a sentinel
+   * ("CRM_UNAVAILABLE"). UI surfaces this distinctly so operators know the
+   * "live" data is stale.
+   */
+  async listWithLiveStatus(opts: {
+    requester: { id: string; role: 'ADMIN' | 'SAM_HEAD' | 'SAM' };
+    limit?: number;
+  }): Promise<{
+    rows: Array<EnrichedLeadRow>;
+    liveDataAvailable: boolean;
+    liveDataError?: string;
+  }> {
+    const dispatches = await this.listDispatches({
+      requester: opts.requester,
+      limit: opts.limit,
+    });
+
+    // No dispatches → nothing to enrich.
+    if (dispatches.length === 0) {
+      return { rows: [], liveDataAvailable: true };
+    }
+
+    // Pull the live view from CRM. For SAM role we filter to their own
+    // user id; for SAM_HEAD/ADMIN we pull everything.
+    let liveBySamLeadId = new Map<string, SamSourcedLead>();
+    let liveDataAvailable = true;
+    let liveDataError: string | undefined;
+    try {
+      const live = await getCrmClient().listSamLeads({
+        samCreatedById:
+          opts.requester.role === 'SAM' ? opts.requester.id : undefined,
+        limit: 200,
+      });
+      liveBySamLeadId = new Map(live.leads.map((l) => [l.samLeadId, l]));
+    } catch (err) {
+      liveDataAvailable = false;
+      liveDataError =
+        err instanceof CrmHttpError
+          ? `CRM ${err.statusCode}`
+          : err instanceof Error
+            ? err.message
+            : 'CRM call failed';
+    }
+
+    const rows: EnrichedLeadRow[] = dispatches.map((d) => {
+      const live = liveBySamLeadId.get(d.samLeadId);
+      return {
+        dispatchId: d.id,
+        samLeadId: d.samLeadId,
+        crmLeadId: d.crmLeadId,
+        crmLeadNumber: d.crmLeadNumber,
+        companyName: d.companyName,
+        contactName: d.contactName,
+        phone: d.phone,
+        email: d.email,
+        designation: d.designation,
+        industry: d.industry,
+        city: d.city,
+        notes: d.notes,
+        dispatchStatus: d.status as 'SENT' | 'DEDUPED' | 'FAILED',
+        dispatchErrorReason: d.errorReason,
+        originalAssignedTo: {
+          id: d.assignedToUserId,
+          name: d.assignedToName,
+          type: d.assignedToType as 'TEAM_LEADER' | 'SOLO_BDM',
+        },
+        // Live CRM-side fields when available; fall back to original assignment.
+        currentOwner: live?.currentOwner ?? {
+          id: d.assignedToUserId,
+          name: d.assignedToName,
+          type: d.assignedToType as 'TEAM_LEADER' | 'SOLO_BDM',
+        },
+        liveStatus: live?.status ?? null,
+        lastUpdatedAt: live?.lastUpdatedAt ?? d.createdAt.toISOString(),
+        createdAt: d.createdAt.toISOString(),
+        createdBy: d.createdBy,
+      };
+    });
+
+    return { rows, liveDataAvailable, liveDataError };
+  },
+};
+
+export type EnrichedLeadRow = {
+  dispatchId: string;
+  samLeadId: string;
+  crmLeadId: string | null;
+  crmLeadNumber: string | null;
+  companyName: string;
+  contactName: string;
+  phone: string;
+  email: string | null;
+  designation: string | null;
+  industry: string | null;
+  city: string | null;
+  notes: string | null;
+  dispatchStatus: 'SENT' | 'DEDUPED' | 'FAILED';
+  dispatchErrorReason: string | null;
+  originalAssignedTo: { id: string; name: string; type: 'TEAM_LEADER' | 'SOLO_BDM' };
+  currentOwner: {
+    id: string;
+    name: string;
+    email?: string | null;
+    type: 'TEAM_LEADER' | 'SOLO_BDM';
+  };
+  /** CRM-side stage; null when the CRM endpoint isn't reachable */
+  liveStatus: string | null;
+  lastUpdatedAt: string;
+  createdAt: string;
+  createdBy: { id: string; name: string; email: string };
 };
 
 async function writeAudit(

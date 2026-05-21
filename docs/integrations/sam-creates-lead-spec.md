@@ -53,6 +53,11 @@ Returns the list of users SAM can assign a lead to. Populates the dropdown at pa
     },
     {
       "id": "<crm-user-uuid>",
+      "name": "Priya Nair",
+      "type": "TEAM_LEADER"
+    },
+    {
+      "id": "<crm-user-uuid>",
       "name": "Kunal Patel",
       "email": "kunal@gazonindia.com",
       "type": "SOLO_BDM"
@@ -61,14 +66,16 @@ Returns the list of users SAM can assign a lead to. Populates the dropdown at pa
 }
 ```
 
+`email` is shown to demonstrate both shapes — Rahul has one (renders as `Rahul Mehta · rahul@gazonindia.com`), Priya doesn't (renders as just `Priya Nair`). CRM may either omit the field entirely or send it as `null` — SAM treats both identically.
+
 Field semantics:
 
-| Field | Type | Notes |
-|---|---|---|
-| `id` | UUID string | Stable — SAM stores this on the create-lead request |
-| `name` | string | Display name in the dropdown |
-| `email` | string | Shown as a sub-label so SAM operators can disambiguate two BDMs with the same first name |
-| `type` | enum: `TEAM_LEADER` \| `SOLO_BDM` | SAM groups the dropdown by type — Team Leaders first, Solo BDMs below |
+| Field | Required | Type | Notes |
+|---|---|---|---|
+| `id` | ✅ | UUID string | Stable — SAM stores this on the create-lead request |
+| `name` | ✅ | string | Display name in the dropdown. **Mandatory** — SAM filters out any BDM with a missing name client-side, since the dropdown can't render an unlabeled option |
+| `email` | optional | string \| null \| omitted | If CRM has it, send it — SAM shows it as a small sub-label under the name to disambiguate two BDMs with the same first name. If CRM doesn't have it (null or field omitted), SAM just shows the name alone. No error. |
+| `type` | ✅ | enum: `TEAM_LEADER` \| `SOLO_BDM` | SAM groups the dropdown by type — Team Leaders first, Solo BDMs below |
 
 **Other response codes:**
 - `401` — JWT expired / missing → SAM re-authenticates via the existing login flow and retries
@@ -285,7 +292,7 @@ No HMAC webhook signing on this flow — these are synchronous API calls, not as
 
 - [ ] New columns on `Lead` model: `source`, `samCreatedById`, `samCreatedByName`, `samCreatedByEmail`, `samCreatedAt`, `samLeadId` (UNIQUE)
 - [ ] Migration for the above
-- [ ] `GET /api/integrations/sam/bdms` — returns active BDM Team Leaders + Solo BDMs
+- [ ] `GET /api/integrations/sam/bdms` — returns active BDM Team Leaders + Solo BDMs. `id` / `name` / `type` are required on every row; `email` is optional (omit or send null when CRM doesn't have one — SAM handles either)
 - [ ] `POST /api/integrations/sam/leads` — validates + creates + assigns + dedupes
 - [ ] Both endpoints behind the existing SAM-service-user JWT auth (no new auth scheme)
 - [ ] Lead detail UI: SAM badge + "Created from SAM by …" callout when `source='SAM'`

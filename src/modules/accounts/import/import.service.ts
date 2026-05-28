@@ -2,6 +2,7 @@ import { Prisma, type ContractStatus, type KittyType } from '@prisma/client';
 import { prisma } from '../../../prisma.js';
 import { deriveKittyType } from '../../../lib/kitty.js';
 import { parseWorkbook, type ParsedRow } from './parse-workbook.js';
+import type { CanonicalRow } from './header-map.js';
 
 /**
  * Compact account preview returned to the UI so users can immediately see
@@ -21,6 +22,11 @@ export type ImportedAccountPreview = {
   currentArc: number;
   kittyType: KittyType;
   contractStatus: ContractStatus;
+  circuitId: string | null;
+  customerCode: string | null;
+  address: string | null;
+  /** Resolved SAM display name (from the user table), or null if no match. */
+  samOwnerName: string | null;
 };
 
 /**
@@ -32,6 +38,7 @@ export type ImportErrorKind =
   | 'missing_field'
   | 'invalid_value'
   | 'duplicate'
+  | 'warning'
   | 'other';
 
 export type ImportError = {
@@ -65,6 +72,13 @@ const STATUS_ALIASES: Record<string, ContractStatus> = {
   terminated: 'TERMINATED',
   closed: 'TERMINATED',
   disconnected: 'TERMINATED',
+  // Common Indian-spreadsheet spelling of "no longer active" — service
+  // has stopped, so treat as TERMINATED rather than EXPIRED (which implies
+  // the contract ran its term).
+  deactive: 'TERMINATED',
+  inactive: 'TERMINATED',
+  notactive: 'TERMINATED',
+  stopped: 'TERMINATED',
   cancelled: 'TERMINATED',
   canceled: 'TERMINATED',
   churned: 'TERMINATED',
@@ -88,8 +102,11 @@ export const importService = {
       })),
     };
 
+    // Pre-load the SAM directory once so per-row resolution is O(1).
+    const samDirectory = await loadSamDirectory();
+
     for (const row of rows) {
-      const validation = validate(row);
+      const validation = validate(row, samDirectory);
       if ('error' in validation) {
         summary.errors.push({
           rowNumber: row.rowNumber,
@@ -101,7 +118,18 @@ export const importService = {
         summary.skipped++;
         continue;
       }
-      const data = validation.data;
+      const { data, samOwnerName, warning } = validation;
+      if (warning) {
+        // Non-blocking — row still imports, but the UI surfaces the issue
+        // so the user can fix the SAM column and re-run.
+        summary.errors.push({
+          rowNumber: row.rowNumber,
+          reason: warning,
+          kind: 'warning',
+          clientName: row.canonical.clientName ?? null,
+          leadId: row.canonical.leadId ?? null,
+        });
+      }
 
       try {
         // Idempotency: leadId first, then externalCrmId
@@ -122,7 +150,7 @@ export const importService = {
               select: previewSelect,
             });
             summary.updated++;
-            summary.updatedAccounts.push(toPreview(row.rowNumber, updated));
+            summary.updatedAccounts.push(toPreview(row.rowNumber, updated, samOwnerName));
             continue;
           }
         }
@@ -131,7 +159,7 @@ export const importService = {
           select: previewSelect,
         });
         summary.imported++;
-        summary.createdAccounts.push(toPreview(row.rowNumber, created));
+        summary.createdAccounts.push(toPreview(row.rowNumber, created, samOwnerName));
       } catch (err) {
         const { reason, kind } = describeDbError(err);
         summary.errors.push({
@@ -158,6 +186,9 @@ const previewSelect = {
   currentArc: true,
   kittyType: true,
   contractStatus: true,
+  circuitId: true,
+  customerCode: true,
+  address: true,
 } as const;
 
 type PreviewRow = {
@@ -170,9 +201,16 @@ type PreviewRow = {
   currentArc: Prisma.Decimal;
   kittyType: KittyType;
   contractStatus: ContractStatus;
+  circuitId: string | null;
+  customerCode: string | null;
+  address: string | null;
 };
 
-function toPreview(rowNumber: number, a: PreviewRow): ImportedAccountPreview {
+function toPreview(
+  rowNumber: number,
+  a: PreviewRow,
+  samOwnerName: string | null,
+): ImportedAccountPreview {
   return {
     rowNumber,
     accountId: a.id,
@@ -184,6 +222,132 @@ function toPreview(rowNumber: number, a: PreviewRow): ImportedAccountPreview {
     currentArc: Number(a.currentArc),
     kittyType: a.kittyType,
     contractStatus: a.contractStatus,
+    circuitId: a.circuitId,
+    customerCode: a.customerCode,
+    address: a.address,
+    samOwnerName,
+  };
+}
+
+/**
+ * In-memory directory of SAM-eligible users (ADMIN / SAM_HEAD / SAM all
+ * count) so import can map an Excel `sam` column — either email or name —
+ * to a user id without per-row DB lookups.
+ *
+ * Matching strategy in `resolveSam`:
+ *  1. Email lookup (case-insensitive, unique).
+ *  2. Exact full-name match (case-insensitive). Ambiguous if 2+ users share a name.
+ *  3. First-name fallback: if Excel says "Mangesh" and exactly ONE user's
+ *     name starts with "mangesh ", auto-assign. Two or more candidates →
+ *     ambiguous warning, imported unassigned.
+ */
+type SamUser = { id: string; name: string };
+type SamDirectory = {
+  byEmail: Map<string, SamUser>;
+  byName: Map<string, { id: string; name: string; ambiguous: boolean }>;
+  allUsers: SamUser[];
+};
+
+async function loadSamDirectory(): Promise<SamDirectory> {
+  const users = await prisma.user.findMany({
+    select: { id: true, name: true, email: true },
+  });
+  const byEmail = new Map<string, SamUser>();
+  const byName = new Map<string, { id: string; name: string; ambiguous: boolean }>();
+  for (const u of users) {
+    byEmail.set(u.email.toLowerCase(), { id: u.id, name: u.name });
+    const key = u.name.trim().toLowerCase();
+    const existing = byName.get(key);
+    if (existing) {
+      byName.set(key, { ...existing, ambiguous: true });
+    } else {
+      byName.set(key, { id: u.id, name: u.name, ambiguous: false });
+    }
+  }
+  return {
+    byEmail,
+    byName,
+    allUsers: users.map((u) => ({ id: u.id, name: u.name })),
+  };
+}
+
+/**
+ * Find users whose first name (first whitespace-delimited token of their
+ * full name) matches `firstName`. Case-insensitive. Used to allow Excel
+ * sheets to identify a SAM by just "Mangesh" when the DB row is
+ * "Mangesh Fulbandhe".
+ */
+function findByFirstName(directory: SamDirectory, firstName: string): SamUser[] {
+  const target = firstName.toLowerCase();
+  const matches: SamUser[] = [];
+  for (const u of directory.allUsers) {
+    const first = u.name.trim().split(/\s+/)[0]?.toLowerCase();
+    if (first === target) matches.push(u);
+  }
+  return matches;
+}
+
+function resolveSam(
+  canonical: CanonicalRow,
+  directory: SamDirectory,
+): { samOwnerId: string | null; samOwnerName: string | null; warning: string | null } {
+  const email = canonical.samEmail?.trim().toLowerCase();
+  if (email) {
+    const hit = directory.byEmail.get(email);
+    if (hit) return { samOwnerId: hit.id, samOwnerName: hit.name, warning: null };
+    return {
+      samOwnerId: null,
+      samOwnerName: null,
+      warning: `SAM email "${canonical.samEmail}" did not match any user. Imported as unassigned.`,
+    };
+  }
+  const rawName = canonical.samName?.trim();
+  if (!rawName) return { samOwnerId: null, samOwnerName: null, warning: null };
+
+  // 1. Exact full-name match.
+  const lower = rawName.toLowerCase();
+  const exact = directory.byName.get(lower);
+  if (exact) {
+    if (exact.ambiguous) {
+      return {
+        samOwnerId: null,
+        samOwnerName: null,
+        warning: `SAM name "${rawName}" matched multiple users with that exact full name — please use the SAM's email instead. Imported as unassigned.`,
+      };
+    }
+    return { samOwnerId: exact.id, samOwnerName: exact.name, warning: null };
+  }
+
+  // 2. First-name fallback. Only meaningful when the Excel value is a
+  //    single token — once the operator wrote two tokens ("Mangesh F"),
+  //    we won't guess at deeper partial matches.
+  if (/\s/.test(rawName)) {
+    return {
+      samOwnerId: null,
+      samOwnerName: null,
+      warning: `SAM name "${rawName}" did not match any user. Imported as unassigned.`,
+    };
+  }
+  const firstNameMatches = findByFirstName(directory, lower);
+  if (firstNameMatches.length === 1) {
+    return {
+      samOwnerId: firstNameMatches[0]!.id,
+      samOwnerName: firstNameMatches[0]!.name,
+      warning: null,
+    };
+  }
+  if (firstNameMatches.length > 1) {
+    const names = firstNameMatches.map((m) => m.name).join(', ');
+    return {
+      samOwnerId: null,
+      samOwnerName: null,
+      warning: `SAM "${rawName}" is ambiguous — could be ${names}. Use the SAM's email or full name. Imported as unassigned.`,
+    };
+  }
+  return {
+    samOwnerId: null,
+    samOwnerName: null,
+    warning: `SAM name "${rawName}" did not match any user. Imported as unassigned.`,
   };
 }
 
@@ -215,12 +379,26 @@ type ValidatedData = {
   externalCrmId?: string | null;
   currentPlan?: string | null;
   bandwidthMbps?: number | null;
+  circuitId?: string | null;
+  customerCode?: string | null;
+  address?: string | null;
+  samOwnerId?: string | null;
+  gstNumber?: string | null;
+  contactPersonName?: string | null;
+  industryType?: string | null;
+  circle?: string | null;
+  accountManager?: string | null;
+  userName?: string | null;
+  ipDetails?: string | null;
   metadata?: object;
 };
 
 function validate(
   row: ParsedRow,
-): { error: string; kind: ImportErrorKind } | { data: ValidatedData } {
+  samDirectory: SamDirectory,
+):
+  | { error: string; kind: ImportErrorKind }
+  | { data: ValidatedData; samOwnerName: string | null; warning: string | null } {
   const c = row.canonical;
   if (!c.clientName) return { error: 'Missing customer/client name', kind: 'missing_field' };
   if (!c.onboardingDate) return { error: 'Missing onboarding date', kind: 'missing_field' };
@@ -236,6 +414,8 @@ function validate(
     }
     status = mapped;
   }
+
+  const sam = resolveSam(c, samDirectory);
 
   return {
     data: {
@@ -254,7 +434,20 @@ function validate(
       externalCrmId: c.externalCrmId ?? null,
       currentPlan: c.currentPlan ?? null,
       bandwidthMbps: typeof c.bandwidthMbps === 'number' ? c.bandwidthMbps : null,
+      circuitId: c.circuitId?.trim() || null,
+      customerCode: c.customerCode?.trim() || null,
+      address: c.address?.trim() || null,
+      samOwnerId: sam.samOwnerId,
+      gstNumber: c.gstNumber?.trim() || null,
+      contactPersonName: c.contactPersonName?.trim() || null,
+      industryType: c.industryType?.trim() || null,
+      circle: c.circle?.trim() || null,
+      accountManager: c.accountManager?.trim() || null,
+      userName: c.userName?.trim() || null,
+      ipDetails: c.ipDetails?.trim() || null,
       metadata: Object.keys(row.metadata).length > 0 ? row.metadata : undefined,
     },
+    samOwnerName: sam.samOwnerName,
+    warning: sam.warning,
   };
 }

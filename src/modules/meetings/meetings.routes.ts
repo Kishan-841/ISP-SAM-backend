@@ -5,6 +5,7 @@ import { requireAuth, requireRole } from '../auth/auth.middleware.js';
 export const meetingsRouter = Router();
 meetingsRouter.use(requireAuth);
 meetingsRouter.post('/', meetingsController.log);
+meetingsRouter.post('/preview-mom-email', meetingsController.previewMomEmail);
 meetingsRouter.post('/send-mom-email', meetingsController.sendMomEmail);
 meetingsRouter.get('/', meetingsController.list);
 meetingsRouter.get('/:id', meetingsController.getById);

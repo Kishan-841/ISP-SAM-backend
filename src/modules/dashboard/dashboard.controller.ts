@@ -1,4 +1,4 @@
-import type { Request, Response } from 'express';
+import type { Response } from 'express';
 import type { CommercialChangeType, KittyType } from '@prisma/client';
 import {
   dashboardService,
@@ -20,17 +20,25 @@ const BUCKETS: readonly CommercialChangeType[] = [
 ];
 
 export const dashboardController = {
-  async existingBase(req: Request, res: Response) {
+  async existingBase(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
     const raw = typeof req.query.quarter === 'string' ? req.query.quarter : undefined;
     const quarter: FyQuarter | undefined = (QUARTERS as readonly string[]).includes(raw ?? '')
       ? (raw as FyQuarter)
       : undefined;
-    const data = await dashboardService.existingBase({ quarter });
+    const data = await dashboardService.existingBase({ quarter, requester: req.user });
     res.json(data);
   },
 
-  async newBase(_req: Request, res: Response) {
-    const data = await computeNewBase();
+  async newBase(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const data = await computeNewBase({ requester: req.user });
     res.json(data);
   },
 

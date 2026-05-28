@@ -77,6 +77,27 @@ model Account {
   customerCode       String?  @unique @map("customer_code")
   circuitId          String?  @unique @map("circuit_id")
   bandwidthMbps      Int?     @map("bandwidth_mbps")
+  /// Free-form installation/service address. Populated by Excel import or
+  /// edited in-app. Single textarea on the UI — no structured fields.
+  address            String?
+  /// GSTIN — e.g. "27AAIFD5398J1ZV". 15-char Indian tax ID. Not unique:
+  /// multiple sites of the same business share one GST.
+  gstNumber          String?  @map("gst_number")
+  /// Primary IT/operations contact at the customer (free-form text, may
+  /// include role prefix + multiple names separated by newlines).
+  contactPersonName  String?  @map("contact_person_name")
+  /// Business segmentation, e.g. "IT", "Developers", "Manufacturing".
+  industryType       String?  @map("industry_type")
+  /// Geographic / network zone, e.g. "Mundhwa", "Undri".
+  circle             String?
+  /// Internal Gazon Account Manager — distinct from `samOwnerId`. Free-form
+  /// because the CRM side doesn't share a user table with SAM yet.
+  accountManager     String?  @map("account_manager")
+  /// Internal slug / username for the customer connection, e.g. "dwl_undri".
+  userName           String?  @map("user_name")
+  /// Comma-separated list of assigned IPs (free text — we don't model them
+  /// individually). Kept verbatim from the operator's spreadsheet.
+  ipDetails          String?  @map("ip_details")
   startOfPeriodArc   Decimal? @map("start_of_period_arc") @db.Decimal(12, 2)
   createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
 

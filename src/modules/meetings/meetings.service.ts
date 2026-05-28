@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../prisma.js';
 import { sendMomToCustomer } from '../../services/email/notifications.service.js';
+import { buildMomToCustomerEmail } from '../../services/email/templates/mom-to-customer.js';
 
 function parseParticipantsJson(
   s: string | null,
@@ -94,6 +95,21 @@ export type CompleteMeetingInput = {
   samPhone: string | null;
   testMode: boolean;
   performedByUserId: string;
+};
+
+export type PreviewMomEmailInput = {
+  accountId: string;
+  scheduledAt: Date;
+  heldAt: Date | null;
+  meetingType: 'ONLINE' | 'PHYSICAL';
+  location: string | null;
+  clientParticipants: string | null;
+  gazonParticipants: string | null;
+  actionItems: ActionItem[] | null;
+  momContent: string;
+  subjectOverride: string | null;
+  samDesignation: string | null;
+  samPhone: string | null;
 };
 
 export const meetingsService = {
@@ -216,6 +232,49 @@ export const meetingsService = {
         },
       });
       return meeting;
+    });
+  },
+
+  /**
+   * Render the MoM email exactly as it would be sent to the customer, but
+   * skip the actual send + DB writes. Used by the "Copy for Outlook" button
+   * so the SAM can paste it into their own Outlook compose window.
+   */
+  async previewMomEmail(input: PreviewMomEmailInput) {
+    const account = await prisma.account.findUnique({
+      where: { id: input.accountId },
+      select: {
+        id: true,
+        clientName: true,
+        companyName: true,
+        customerCode: true,
+        circuitId: true,
+        samOwnerId: true,
+      },
+    });
+    if (!account) throw new Error('Account not found');
+
+    const owningSam = account.samOwnerId
+      ? await prisma.user.findUnique({
+          where: { id: account.samOwnerId },
+          select: { name: true },
+        })
+      : null;
+
+    return buildMomToCustomerEmail({
+      account,
+      samName: owningSam?.name ?? 'Gazon SAM Team',
+      meetingScheduledAt: input.scheduledAt,
+      meetingHeldAt: input.heldAt,
+      meetingType: input.meetingType,
+      location: input.location,
+      clientParticipants: parseParticipantsJson(input.clientParticipants),
+      gazonParticipants: parseParticipantsJson(input.gazonParticipants),
+      actionItems: input.actionItems ?? [],
+      momContent: input.momContent,
+      subjectOverride: input.subjectOverride,
+      samDesignation: input.samDesignation,
+      samPhone: input.samPhone,
     });
   },
 

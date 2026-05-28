@@ -20,14 +20,75 @@ import type { EmailClient, EmailMessage, SendResult } from './email-client.js';
 const DEFAULT_ENDPOINT = 'https://emailapi.netcorecloud.net/v5/mail/send';
 
 type NetcoreSendResponse = {
-  message?: string;
-  data?: { message_id?: string };
-  errors?: Array<{ message?: string; code?: number }>;
-  // Netcore returns single-error responses (e.g. IP-not-whitelisted) under
-  // this singular field, not the `errors` array — surface it so the reason
-  // lands in the audit log instead of a naked "HTTP 403".
-  error?: string;
+  message?: unknown;
+  // Success: data = { message_id }. Failure (v5 validation): data = [{ code, message, more_info }, ...]
+  data?: unknown;
+  errors?: unknown;
+  error?: unknown;
 };
+
+function extractNetcoreError(body: NetcoreSendResponse, status: number): string {
+  const stringify = (item: unknown): string => {
+    if (item == null) return '';
+    if (typeof item === 'string') return item;
+    if (typeof item === 'number' || typeof item === 'boolean') return String(item);
+    if (typeof item === 'object') {
+      const o = item as Record<string, unknown>;
+      const msg = o.message ?? o.error ?? o.reason ?? o.detail ?? o.more_info ?? o.description;
+      if (typeof msg === 'string' && msg.trim()) {
+        const code = o.code ?? o.statusCode;
+        return code != null ? `${msg} (code=${String(code)})` : msg;
+      }
+      try {
+        return JSON.stringify(item);
+      } catch {
+        return '[unserializable]';
+      }
+    }
+    return String(item);
+  };
+
+  const fromList = (list: unknown): string | null => {
+    if (!Array.isArray(list) || list.length === 0) return null;
+    const parts = list.map(stringify).filter((s) => s && s.length > 0);
+    return parts.length > 0 ? parts.join('; ') : null;
+  };
+
+  // 1. Top-level string fields
+  if (typeof body.error === 'string' && body.error.trim()) return body.error;
+  if (typeof body.message === 'string' && body.message.trim()) return body.message;
+
+  // 2. Array fields (any of error / errors / data when not the success shape)
+  const dataAsList = Array.isArray(body.data) ? body.data : null;
+  const fromAny =
+    fromList(body.errors) ??
+    fromList(body.error) ??
+    fromList(dataAsList);
+  if (fromAny) return fromAny;
+
+  // 3. Single-object fields (e.g. message: { ... } or data: { error: "..." } in non-success path)
+  if (body.message && typeof body.message === 'object') {
+    const s = stringify(body.message);
+    if (s) return s;
+  }
+  if (body.data && typeof body.data === 'object' && !Array.isArray(body.data)) {
+    const o = body.data as Record<string, unknown>;
+    // Treat as error only if no message_id (otherwise it's success)
+    if (!('message_id' in o)) {
+      const s = stringify(body.data);
+      if (s && s !== '{}') return s;
+    }
+  }
+
+  // 4. Last resort — full body dump
+  try {
+    const dump = JSON.stringify(body);
+    if (dump && dump !== '{}') return dump;
+  } catch {
+    // ignore
+  }
+  return `HTTP ${status}`;
+}
 
 export class NetcoreEmailClient implements EmailClient {
   private readonly apiKey: string;
@@ -97,20 +158,37 @@ export class NetcoreEmailClient implements EmailClient {
       };
     }
 
-    const body = (await res.json().catch(() => ({}))) as NetcoreSendResponse;
+    // Read response as text first so we can log it raw even when JSON parse
+    // fails or when the body has a non-JSON content-type.
+    const rawText = await res.text().catch(() => '');
+    let body: NetcoreSendResponse = {};
+    try {
+      body = rawText ? (JSON.parse(rawText) as NetcoreSendResponse) : {};
+    } catch {
+      // Keep body empty; rawText still gets logged below for diagnosis.
+    }
 
-    if (!res.ok) {
-      const detail =
-        body.errors?.map((e) => e.message).filter(Boolean).join('; ') ||
-        body.message ||
-        body.error ||
-        `HTTP ${res.status}`;
+    // Netcore v5 sometimes returns HTTP 200 with an error payload (e.g. body
+    // = { data: [{ code: 422, message: "..." }] } and no message_id). Treat
+    // that as a failure too.
+    const hasSuccessShape =
+      body.data && typeof body.data === 'object' && !Array.isArray(body.data) &&
+      typeof (body.data as Record<string, unknown>).message_id === 'string';
+
+    if (!res.ok || !hasSuccessShape) {
+      const detail = extractNetcoreError(body, res.status) || rawText.slice(0, 500) || `HTTP ${res.status}`;
+      // eslint-disable-next-line no-console
+      console.warn('[netcore] send failed', JSON.stringify({
+        status: res.status,
+        rawText: rawText.slice(0, 1000),
+        parsedBody: body,
+        to: message.to,
+        subject: message.subject,
+      }, null, 2));
       return { ok: false, error: `Netcore rejected: ${detail}` };
     }
 
-    // Successful v5 response shape:
-    //   { message: "Email accepted for delivery", data: { message_id: "<id>" } }
-    const messageId = body.data?.message_id ?? `netcore-${Date.now()}`;
+    const messageId = (body.data as { message_id: string }).message_id;
     return { ok: true, messageId };
   }
 }

@@ -62,7 +62,7 @@ describe('POST /accounts/import', () => {
     expect(res.body.errors).toEqual([]);
   });
 
-  it('puts unknown columns into metadata', async () => {
+  it('puts unknown columns into metadata, and captures first-class business fields', async () => {
     const cookie = await adminCookie();
     const res = await request(app)
       .post('/accounts/import')
@@ -70,14 +70,14 @@ describe('POST /accounts/import', () => {
       .attach('file', fixture('extra-cols.csv'), 'extra-cols.csv');
     expect(res.status).toBe(200);
     expect(res.body.imported).toBe(1);
-    // Verify metadata persisted
+    // "Industry" and "Region" are now first-class fields (industryType, circle).
+    // Only genuinely-unknown columns like "SLA Tier" fall through to metadata.
     const list = await request(app).get('/accounts').set('Cookie', cookie);
     expect(list.body.accounts).toHaveLength(1);
-    expect(list.body.accounts[0].metadata).toMatchObject({
-      Industry: 'Manufacturing',
-      Region: 'North',
-      'SLA Tier': 'Gold-24x7',
-    });
+    const account = list.body.accounts[0];
+    expect(account.industryType).toBe('Manufacturing');
+    expect(account.circle).toBe('North');
+    expect(account.metadata).toMatchObject({ 'SLA Tier': 'Gold-24x7' });
   });
 
   it('skips rows missing required fields and reports errors', async () => {

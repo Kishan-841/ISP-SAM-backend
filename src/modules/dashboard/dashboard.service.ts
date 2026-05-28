@@ -1,8 +1,32 @@
-import { Prisma } from '@prisma/client';
+import { Prisma, type UserRole } from '@prisma/client';
 import { prisma } from '../../prisma.js';
 import { sweepDueTerminations } from '../commercial-changes/commercial-changes.service.js';
 
 export type FyQuarter = 'Q1' | 'Q2' | 'Q3' | 'Q4';
+
+export type DashboardRequester = { id: string; role: UserRole };
+
+/**
+ * Build the Prisma `where` clause that scopes Account queries to whatever
+ * the requester is allowed to see. Mirrors `accountsService.list` and
+ * `alerts.service.ts:scopedAccountIds`:
+ *  - ADMIN     → everything
+ *  - SAM_HEAD  → own customers + their reports' customers
+ *  - SAM       → only own customers
+ */
+async function buildAccountScope(
+  requester: DashboardRequester,
+): Promise<Prisma.AccountWhereInput> {
+  if (requester.role === 'ADMIN') return {};
+  if (requester.role === 'SAM') return { samOwnerId: requester.id };
+  // SAM_HEAD
+  const reports = await prisma.user.findMany({
+    where: { samHeadId: requester.id },
+    select: { id: true },
+  });
+  const ownerIds = [requester.id, ...reports.map((r) => r.id)];
+  return { samOwnerId: { in: ownerIds } };
+}
 
 /** Inclusive [start, end] of an Indian-FY quarter for the FY containing `now`. */
 export function fyQuarterRange(
@@ -109,14 +133,20 @@ export type ExistingBaseMetrics = {
 const LAKH = 100_000;
 
 export const dashboardService = {
-  async existingBase(opts: { quarter?: FyQuarter } = {}): Promise<ExistingBaseMetrics> {
+  async existingBase(opts: {
+    quarter?: FyQuarter;
+    requester: DashboardRequester;
+  }): Promise<ExistingBaseMetrics> {
     // Sweep any disconnections whose 10-day notice has expired so the
     // dashboard reflects current truth before we read accounts/changes.
     await sweepDueTerminations();
 
+    const scope = await buildAccountScope(opts.requester);
+
     // 1. BASE accounts snapshot — always anchored to April 1.
+    //    Scope-filtered so a SAM only sees their own customers, etc.
     const baseAccounts = await prisma.account.findMany({
-      where: { kittyType: 'BASE' },
+      where: { kittyType: 'BASE', ...scope },
       select: {
         id: true,
         currentArc: true,
@@ -328,14 +358,17 @@ function daysBetween(later: Date, earlier: Date): number {
 }
 
 export async function computeNewBase(
+  opts: { requester: DashboardRequester },
   now: Date = new Date(),
 ): Promise<NewBaseMetrics> {
   // Sweep any disconnections whose 10-day notice has expired so this view
   // reflects current truth — mirrors the existingBase entry point.
   await sweepDueTerminations();
 
+  const scope = await buildAccountScope(opts.requester);
+
   const newAccounts = await prisma.account.findMany({
-    where: { kittyType: 'NEW' },
+    where: { kittyType: 'NEW', ...scope },
     select: {
       id: true,
       clientName: true,

@@ -22,6 +22,20 @@ export type CanonicalRow = {
   externalCrmId?: string;
   currentPlan?: string;
   bandwidthMbps?: number;
+  circuitId?: string;
+  customerCode?: string;
+  address?: string;
+  /** SAM owner identifiers — resolved to a user at import time. Email is
+   *  matched first (unique), then name as a fallback. */
+  samEmail?: string;
+  samName?: string;
+  gstNumber?: string;
+  contactPersonName?: string;
+  industryType?: string;
+  circle?: string;
+  accountManager?: string;
+  userName?: string;
+  ipDetails?: string;
 };
 
 /**
@@ -93,6 +107,11 @@ export const HEADER_SYNONYMS: Record<string, ParsedRowKey> = {
   since: 'onboardingDate',
   installationdate: 'onboardingDate',
   activationdate: 'onboardingDate',
+  billingstartdate: 'onboardingDate',
+  billingdate: 'onboardingDate',
+  billingstart: 'onboardingDate',
+  servicestartdate: 'onboardingDate',
+  commissioningdate: 'onboardingDate',
 
   // leadId
   leadid: 'leadId',
@@ -101,6 +120,7 @@ export const HEADER_SYNONYMS: Record<string, ParsedRowKey> = {
   // externalCrmId
   externalcrmid: 'externalCrmId',
   crmid: 'externalCrmId',
+  crmcustomerid: 'externalCrmId',
   customerid: 'externalCrmId',
   subscriberid: 'externalCrmId',
   connectionid: 'externalCrmId',
@@ -116,13 +136,100 @@ export const HEADER_SYNONYMS: Record<string, ParsedRowKey> = {
   mbps: 'bandwidthMbps',
   speed: 'bandwidthMbps',
   bandwidthmbps: 'bandwidthMbps',
+  bw: 'bandwidthMbps',
+  currentbw: 'bandwidthMbps',
+
+  // circuitId
+  circuitid: 'circuitId',
+  circuit: 'circuitId',
+  circuitno: 'circuitId',
+  circuitnumber: 'circuitId',
+
+  // customerCode
+  customercode: 'customerCode',
+  custcode: 'customerCode',
+  accountcode: 'customerCode',
+  code: 'customerCode',
+
+  // address (free-form installation / service address)
+  address: 'address',
+  installationaddress: 'address',
+  serviceaddress: 'address',
+  customeraddress: 'address',
+  location: 'address',
+  siteaddress: 'address',
+  billingaddress: 'address',
+
+  // SAM owner — email (preferred, unique) or name (fallback)
+  samemail: 'samEmail',
+  assignedsamemail: 'samEmail',
+  samowneremail: 'samEmail',
+  owneremail: 'samEmail',
+  sam: 'samName',
+  samname: 'samName',
+  samowner: 'samName',
+  assignedsam: 'samName',
+  assignedto: 'samName',
+  owner: 'samName',
+
+  // gstNumber
+  gst: 'gstNumber',
+  gstno: 'gstNumber',
+  gstnumber: 'gstNumber',
+  gstin: 'gstNumber',
+  taxid: 'gstNumber',
+
+  // contactPersonName
+  contactperson: 'contactPersonName',
+  contactpersonname: 'contactPersonName',
+  contactname: 'contactPersonName',
+  primarycontact: 'contactPersonName',
+  spoc: 'contactPersonName',
+
+  // industryType
+  industry: 'industryType',
+  industrytype: 'industryType',
+  sector: 'industryType',
+  vertical: 'industryType',
+  businesstype: 'industryType',
+
+  // circle (geographic / network zone)
+  circle: 'circle',
+  zone: 'circle',
+  region: 'circle',
+  area: 'circle',
+
+  // accountManager (internal AM — distinct from SAM)
+  accountmanager: 'accountManager',
+  am: 'accountManager',
+  amname: 'accountManager',
+  internalam: 'accountManager',
+
+  // userName (internal slug, e.g. "dwl_undri")
+  username: 'userName',
+  loginname: 'userName',
+  internalcode: 'userName',
+  internalslug: 'userName',
+
+  // ipDetails (comma-separated free text)
+  ipdetails: 'ipDetails',
+  ip: 'ipDetails',
+  ipaddress: 'ipDetails',
+  ipaddresses: 'ipDetails',
+  assignedips: 'ipDetails',
 };
 
 export function normalizeHeader(header: string): string {
+  // Drop parenthesised qualifiers like "(IT)", "(Active/Inactive)" first —
+  // they're usually annotations, not part of the field name. So
+  // "Email ID(IT)" normalizes to "emailid" and matches the email synonym.
+  // Then lowercase and strip all non-alphanumerics so spelling/punctuation
+  // variations collapse to the same canonical form.
   return header
     .trim()
+    .replace(/\s*\([^)]*\)/g, '')
     .toLowerCase()
-    .replace(/[^a-z0-9]/g, ''); // strip spaces, underscores, dashes, parens, etc.
+    .replace(/[^a-z0-9]/g, '');
 }
 
 export function mapHeader(header: string): ParsedRowKey | null {

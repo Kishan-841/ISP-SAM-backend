@@ -52,6 +52,24 @@ const sendMomEmailSchema = z.object({
   testMode: z.boolean().optional().default(false),
 });
 
+const previewMomEmailSchema = z.object({
+  accountId: z.string().uuid(),
+  scheduledAt: z.string().refine((s) => !Number.isNaN(Date.parse(s)), 'Invalid date'),
+  heldAt: z
+    .string()
+    .optional()
+    .refine((s) => s === undefined || !Number.isNaN(Date.parse(s)), 'Invalid date'),
+  meetingType: z.enum(['ONLINE', 'PHYSICAL']).default('ONLINE'),
+  location: z.string().nullable().optional(),
+  clientParticipants: z.string().optional(),
+  gazonParticipants: z.string().optional(),
+  actionItems: z.array(actionItemSchema).optional(),
+  momContent: z.string().min(1, 'MoM content is required'),
+  subject: z.string().optional(),
+  samDesignation: z.string().optional(),
+  samPhone: z.string().optional(),
+});
+
 const completeMeetingSchema = z.object({
   agenda: z.string().optional(),
   clientParticipants: z.string().optional(),
@@ -164,6 +182,50 @@ export const meetingsController = {
     } catch (err) {
       if (err instanceof Error && /Record to update not found/i.test(err.message)) {
         res.status(404).json({ error: 'Meeting not found' });
+        return;
+      }
+      throw err;
+    }
+  },
+
+  async previewMomEmail(req: AuthedRequest, res: Response) {
+    const user = requireUser(req, res);
+    if (!user) return;
+    const parse = previewMomEmailSchema.safeParse(req.body);
+    if (!parse.success) {
+      res.status(400).json({ error: parse.error.issues[0]?.message ?? 'Invalid body' });
+      return;
+    }
+    try {
+      const result = await meetingsService.previewMomEmail({
+        accountId: parse.data.accountId,
+        scheduledAt: new Date(parse.data.scheduledAt),
+        heldAt: parse.data.heldAt ? new Date(parse.data.heldAt) : null,
+        meetingType: parse.data.meetingType,
+        location:
+          parse.data.meetingType === 'PHYSICAL' ? parse.data.location?.trim() || null : null,
+        clientParticipants: parse.data.clientParticipants?.trim() || null,
+        gazonParticipants: parse.data.gazonParticipants?.trim() || null,
+        actionItems:
+          parse.data.actionItems && parse.data.actionItems.length > 0
+            ? parse.data.actionItems.map((item, idx) => ({
+                srNo: item.srNo || idx + 1,
+                discussionDescription: item.discussionDescription,
+                actionOwner: item.actionOwner ?? '',
+                planOfAction: item.planOfAction ?? '',
+                closureDate: item.closureDate ?? null,
+                currentStatus: item.currentStatus ?? 'Open',
+              }))
+            : null,
+        momContent: parse.data.momContent,
+        subjectOverride: parse.data.subject?.trim() || null,
+        samDesignation: parse.data.samDesignation?.trim() || null,
+        samPhone: parse.data.samPhone?.trim() || null,
+      });
+      res.json(result);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Account not found') {
+        res.status(404).json({ error: err.message });
         return;
       }
       throw err;

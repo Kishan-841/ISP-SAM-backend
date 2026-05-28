@@ -41,6 +41,10 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
       if (!header) continue;
       const value = raw[c];
       if (value === null || value === undefined || value === '') continue;
+      // Operators often type "NA", "N/A", "-", "—", "TBD" into empty cells.
+      // Treat these as absent — produces a clean "Missing X" rejection later
+      // instead of a confusing "Invalid date for NA".
+      if (isEmptySentinel(value)) continue;
       const key = mapHeader(header);
       if (!key) {
         metadata[header] = value;
@@ -82,22 +86,68 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
   return { rows, errors };
 }
 
+// Common "no value" sentinels operators type into spreadsheets when a cell
+// is empty. Treating these as null produces a clean "Missing X" rejection
+// instead of "Invalid X" — same outcome, friendlier error message.
+const EMPTY_SENTINELS = new Set(['', '-', '–', '—', 'na', 'n/a', 'null', 'none', 'tbd', 'tbc']);
+
+function isEmptySentinel(v: unknown): boolean {
+  if (v === null || v === undefined) return true;
+  const s = String(v).trim().toLowerCase();
+  return EMPTY_SENTINELS.has(s);
+}
+
 function parseNumber(v: unknown): number | null {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (isEmptySentinel(v)) return null;
   const s = String(v).replace(/[,₹\s]/g, '').replace(/L$/i, ''); // strip ₹, commas, optional 'L' suffix
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
 
+const MONTH_ABBR: Record<string, number> = {
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+  jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11,
+};
+
 function parseDate(v: unknown): Date | null {
   if (v instanceof Date) return v;
+  if (isEmptySentinel(v)) return null;
   const s = String(v).trim();
-  // Accept ISO (YYYY-MM-DD) and DD/MM/YYYY (Indian format)
-  const iso = /^\d{4}-\d{2}-\d{2}$/;
-  const indian = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
-  if (iso.test(s)) return new Date(s + 'T00:00:00Z');
-  const m = s.match(indian);
-  if (m) return new Date(Date.UTC(+m[3]!, +m[2]! - 1, +m[1]!));
+  if (!s) return null;
+
+  // ISO: YYYY-MM-DD
+  const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})$/;
+  let m = s.match(iso);
+  if (m) return new Date(Date.UTC(+m[1]!, +m[2]! - 1, +m[3]!));
+
+  // Indian numeric: DD/MM/YYYY  or  DD-MM-YYYY
+  const numericDmy = /^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/;
+  m = s.match(numericDmy);
+  if (m) {
+    const day = +m[1]!;
+    const month = +m[2]!;
+    let year = +m[3]!;
+    if (year < 100) year += year < 70 ? 2000 : 1900;
+    return new Date(Date.UTC(year, month - 1, day));
+  }
+
+  // Indian abbreviated month: DD-Mon-YY, DD-Mon-YYYY, DD/Mon/YYYY, DD Mon YYYY
+  //   e.g. "31-Aug-20", "1-Apr-2024", "15 Mar 2025"
+  const dmyAbbr = /^(\d{1,2})[\s\/-]([A-Za-z]{3,4})[\s\/-](\d{2,4})$/;
+  m = s.match(dmyAbbr);
+  if (m) {
+    const day = +m[1]!;
+    const month = MONTH_ABBR[m[2]!.toLowerCase()];
+    if (month === undefined) return null;
+    let year = +m[3]!;
+    if (year < 100) year += year < 70 ? 2000 : 1900;
+    return new Date(Date.UTC(year, month, day));
+  }
+
+  // Last-resort fallback. Native parsing risks a TZ shift, so we re-anchor
+  // to UTC midnight using the parsed Y/M/D.
   const d = new Date(s);
-  return Number.isFinite(d.getTime()) ? d : null;
+  if (!Number.isFinite(d.getTime())) return null;
+  return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
 }

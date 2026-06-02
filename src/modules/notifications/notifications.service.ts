@@ -146,7 +146,10 @@ export async function getNotifications({
   const readByAuditId = new Map(stateRows.map((s) => [s.auditLogId, s.readAt]));
 
   // 3. Hydrate user names + account/change refs for the title strings.
-  const performerIds = Array.from(new Set(rows.map((r) => r.performedBy)));
+  //    performedBy is nullable (pre-auth events like LOGIN_FAILED), skip those.
+  const performerIds = Array.from(
+    new Set(rows.map((r) => r.performedBy).filter((p): p is string => !!p)),
+  );
   const acctIds = Array.from(
     new Set(rows.filter((r) => r.entityType === 'Account').map((r) => r.entityId)),
   );
@@ -188,7 +191,7 @@ export async function getNotifications({
   const ccById = new Map(ccRows.map((c) => [c.id, c]));
 
   const notifications: NotificationItem[] = rows.map((r) => {
-    const performer = performerById.get(r.performedBy);
+    const performer = r.performedBy ? performerById.get(r.performedBy) : undefined;
     const actorName = performer?.name ?? null;
     const fmt = formatRow({ row: r, accountById, ccById, actorName });
     const readAt = readByAuditId.get(r.id);

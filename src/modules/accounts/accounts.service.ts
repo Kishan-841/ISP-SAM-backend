@@ -17,6 +17,44 @@ const TYPE_LABEL: Record<CommercialChangeType, string> = {
 export type Requester = { id: string; role: UserRole };
 
 /**
+ * Fields an admin can edit via PATCH /accounts/:id. Anything not in this
+ * union (id, kittyType, samOwnerId, startOfPeriodArc, metadata, createdAt)
+ * is either immutable or has its own dedicated endpoint (`/assign`).
+ *   - `undefined` = field not touched
+ *   - `null`      = clear the field (where nullable)
+ */
+export type AccountUpdatePatch = {
+  clientName?: string;
+  companyName?: string | null;
+  mobileNumber?: string | null;
+  email?: string | null;
+  currentArc?: number;
+  contractStatus?:
+    | 'ACTIVE'
+    | 'EXPIRED'
+    | 'TERMINATED'
+    | 'PENDING'
+    | 'PROBABLE_CHURN'
+    | 'DISCONNECTING'
+    | 'PENDING_QUICK_APPROVAL';
+  currentPlan?: string | null;
+  bandwidthMbps?: number | null;
+  customerCode?: string | null;
+  circuitId?: string | null;
+  address?: string | null;
+  gstNumber?: string | null;
+  contactPersonName?: string | null;
+  industryType?: string | null;
+  circle?: string | null;
+  accountManager?: string | null;
+  userName?: string | null;
+  ipDetails?: string | null;
+  leadId?: string | null;
+  externalCrmId?: string | null;
+  onboardingDate?: string;
+};
+
+/**
  * Owner filter:
  *  - 'mine'        → assigned to the requester (only meaningful for SAM/SAM_HEAD)
  *  - 'unassigned'  → samOwnerId IS NULL (the SAM_HEAD triage queue)
@@ -152,7 +190,7 @@ export const accountsService = {
     // Hydrate user names referenced by changes / audits / meetings.
     const userIds = new Set<string>();
     for (const c of changes) userIds.add(c.createdBy);
-    for (const a of audits) userIds.add(a.performedBy);
+    for (const a of audits) if (a.performedBy) userIds.add(a.performedBy);
     for (const m of meetings) userIds.add(m.createdBy);
     // Pull owner-id targets out of audit payloads.
     for (const a of audits) {
@@ -270,6 +308,136 @@ export const accountsService = {
    * Authorisation is enforced by the caller (controller); this layer just
    * runs the update + audit log inside one transaction.
    */
+  /**
+   * Admin edit-any-field flow. Caller has already authorised the request
+   * (ADMIN only at the route level). Diffs against current row, applies
+   * the changes inside a transaction, and writes ONE audit_log row per
+   * changed field with before/after in the payload — so the activity log
+   * shows exactly which fields the admin touched.
+   *
+   * Returns the updated account + the list of fields that actually changed
+   * (so the controller can short-circuit no-op responses if it wants).
+   */
+  async update({
+    accountId,
+    patch,
+    requester,
+    ipAddress,
+    userAgent,
+  }: {
+    accountId: string;
+    patch: AccountUpdatePatch;
+    requester: Requester;
+    ipAddress: string | null;
+    userAgent: string | null;
+  }) {
+    return prisma.$transaction(async (tx) => {
+      const before = await tx.account.findUnique({
+        where: { id: accountId },
+        include: ACCOUNT_INCLUDE,
+      });
+      if (!before) throw new Error('Account not found');
+
+      // Build a Prisma update payload from only the keys the caller
+      // actually sent. `undefined` = "don't touch", `null` = clear.
+      const data: Prisma.AccountUpdateInput = {};
+      const diffs: Array<{ field: string; from: unknown; to: unknown }> = [];
+
+      const stringFields: Array<keyof AccountUpdatePatch> = [
+        'clientName',
+        'companyName',
+        'mobileNumber',
+        'email',
+        'currentPlan',
+        'customerCode',
+        'circuitId',
+        'address',
+        'gstNumber',
+        'contactPersonName',
+        'industryType',
+        'circle',
+        'accountManager',
+        'userName',
+        'ipDetails',
+        'leadId',
+        'externalCrmId',
+      ];
+      for (const k of stringFields) {
+        if (patch[k] === undefined) continue;
+        const next = patch[k] === null ? null : String(patch[k]).trim() || null;
+        const prev = (before as unknown as Record<string, unknown>)[k] ?? null;
+        if ((prev ?? null) !== (next ?? null)) {
+          (data as Record<string, unknown>)[k] = next;
+          diffs.push({ field: k, from: prev, to: next });
+        }
+      }
+      if (patch.bandwidthMbps !== undefined) {
+        const next =
+          patch.bandwidthMbps === null
+            ? null
+            : Number.isFinite(patch.bandwidthMbps)
+              ? Math.round(patch.bandwidthMbps)
+              : null;
+        const prev = before.bandwidthMbps ?? null;
+        if (prev !== next) {
+          data.bandwidthMbps = next;
+          diffs.push({ field: 'bandwidthMbps', from: prev, to: next });
+        }
+      }
+      if (patch.currentArc !== undefined) {
+        const next = Number(patch.currentArc);
+        const prev = Number(before.currentArc);
+        if (Number.isFinite(next) && next !== prev) {
+          data.currentArc = next as unknown as Prisma.Decimal;
+          diffs.push({ field: 'currentArc', from: prev, to: next });
+        }
+      }
+      if (patch.contractStatus !== undefined && patch.contractStatus !== before.contractStatus) {
+        data.contractStatus = patch.contractStatus;
+        diffs.push({
+          field: 'contractStatus',
+          from: before.contractStatus,
+          to: patch.contractStatus,
+        });
+      }
+      if (patch.onboardingDate !== undefined) {
+        const next = patch.onboardingDate ? new Date(patch.onboardingDate) : null;
+        if (next && !Number.isNaN(next.getTime())) {
+          const prevIso = before.onboardingDate.toISOString().slice(0, 10);
+          const nextIso = next.toISOString().slice(0, 10);
+          if (prevIso !== nextIso) {
+            data.onboardingDate = next;
+            diffs.push({ field: 'onboardingDate', from: prevIso, to: nextIso });
+          }
+        }
+      }
+
+      if (diffs.length === 0) {
+        return { account: before, diffs };
+      }
+
+      const updated = await tx.account.update({
+        where: { id: accountId },
+        data,
+        include: ACCOUNT_INCLUDE,
+      });
+
+      await tx.auditLog.createMany({
+        data: diffs.map((d) => ({
+          entityType: 'Account',
+          entityId: accountId,
+          action: 'UPDATE_FIELD',
+          performedBy: requester.id,
+          ipAddress,
+          userAgent,
+          payload: { field: d.field, from: d.from, to: d.to } as Prisma.InputJsonValue,
+        })),
+      });
+
+      return { account: updated, diffs };
+    });
+  },
+
   async assign({
     accountId,
     samUserId,

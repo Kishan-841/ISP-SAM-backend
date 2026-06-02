@@ -17,6 +17,12 @@ import { probableChurnRouter } from './modules/probable-churn/probable-churn.rou
 import { usersRouter } from './modules/users/users.routes.js';
 
 export const app = express();
+// Behind nginx / Caddy / Cloudflare, `X-Forwarded-For` carries the real
+// client IP. `trust proxy: 'loopback, linklocal, uniquelocal'` honours
+// the header only when the socket peer is a local/private proxy, so
+// audit logs capture the real client IP without trusting arbitrary
+// upstream X-Forwarded-For headers.
+app.set('trust proxy', 'loopback, linklocal, uniquelocal');
 // Capture the raw request body so HMAC verification can recompute the
 // signature over the exact bytes the sender signed. Without this, JSON
 // re-stringification would drift and the signatures would never match.

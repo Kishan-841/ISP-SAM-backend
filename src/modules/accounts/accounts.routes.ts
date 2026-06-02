@@ -20,3 +20,4 @@ accountsRouter.post(
   requireRole('ADMIN', 'SAM_HEAD'),
   accountsController.assign,
 );
+accountsRouter.patch('/:id', requireRole('ADMIN'), accountsController.update);

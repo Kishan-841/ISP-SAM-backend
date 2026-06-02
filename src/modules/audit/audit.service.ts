@@ -6,8 +6,10 @@ export type AuditEntry = {
   entityType: string;
   entityId: string;
   action: string;
-  performedBy: string;
+  performedBy: string | null;
   performer: { id: string; name: string; email: string; role: string } | null;
+  ipAddress: string | null;
+  userAgent: string | null;
   payload: unknown;
   timestamp: Date;
 };
@@ -40,8 +42,11 @@ export const auditService = {
     ]);
 
     // Hydrate performer info in one query — `performed_by` is just a uuid
-    // and we want to display name/email in the UI.
-    const performerIds = Array.from(new Set(rows.map((r) => r.performedBy)));
+    // and we want to display name/email in the UI. Skip nulls
+    // (LOGIN_FAILED etc. have no user yet).
+    const performerIds = Array.from(
+      new Set(rows.map((r) => r.performedBy).filter((p): p is string => !!p)),
+    );
     const performers = performerIds.length
       ? await prisma.user.findMany({
           where: { id: { in: performerIds } },
@@ -56,7 +61,9 @@ export const auditService = {
       entityId: r.entityId,
       action: r.action,
       performedBy: r.performedBy,
-      performer: byId.get(r.performedBy) ?? null,
+      performer: r.performedBy ? byId.get(r.performedBy) ?? null : null,
+      ipAddress: r.ipAddress,
+      userAgent: r.userAgent,
       payload: r.payload,
       timestamp: r.timestamp,
     }));

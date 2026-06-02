@@ -4,11 +4,52 @@ import type { KittyType } from '@prisma/client';
 import { accountsService, type OwnerFilter } from './accounts.service.js';
 import { prisma } from '../../prisma.js';
 import type { AuthedRequest } from '../auth/auth.middleware.js';
+import { getRequestContext } from '../../lib/request-context.js';
 
 const OWNER_FILTERS: ReadonlySet<string> = new Set(['mine', 'unassigned', 'team', 'all']);
 
 const assignSchema = z.object({
   samUserId: z.string().uuid().nullable(),
+});
+
+const optionalString = z.string().nullable().optional();
+const optionalRequiredString = z.string().min(1).optional();
+
+const updateSchema = z.object({
+  clientName: optionalRequiredString,
+  companyName: optionalString,
+  mobileNumber: optionalString,
+  email: z.string().email().nullable().optional(),
+  currentArc: z.number().nonnegative().optional(),
+  contractStatus: z
+    .enum([
+      'ACTIVE',
+      'EXPIRED',
+      'TERMINATED',
+      'PENDING',
+      'PROBABLE_CHURN',
+      'DISCONNECTING',
+      'PENDING_QUICK_APPROVAL',
+    ])
+    .optional(),
+  currentPlan: optionalString,
+  bandwidthMbps: z.number().int().nonnegative().nullable().optional(),
+  customerCode: optionalString,
+  circuitId: optionalString,
+  address: optionalString,
+  gstNumber: optionalString,
+  contactPersonName: optionalString,
+  industryType: optionalString,
+  circle: optionalString,
+  accountManager: optionalString,
+  userName: optionalString,
+  ipDetails: optionalString,
+  leadId: optionalString,
+  externalCrmId: optionalString,
+  onboardingDate: z
+    .string()
+    .optional()
+    .refine((s) => s === undefined || !Number.isNaN(Date.parse(s)), 'Invalid date'),
 });
 
 export const accountsController = {
@@ -109,6 +150,55 @@ export const accountsController = {
     } catch (err) {
       if (err instanceof Error && err.message === 'Account not found') {
         res.status(404).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+  },
+
+  /**
+   * PATCH /accounts/:id (ADMIN only)
+   * Edit any combination of editable fields. Each changed field gets
+   * its own audit_log row with before/after values and the requester's
+   * IP + user-agent.
+   */
+  async update(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const parse = updateSchema.safeParse(req.body);
+    if (!parse.success) {
+      res.status(400).json({ error: parse.error.issues[0]?.message ?? 'Invalid body' });
+      return;
+    }
+    const ctx = getRequestContext(req);
+    try {
+      const { account, diffs } = await accountsService.update({
+        accountId: req.params.id as string,
+        patch: parse.data,
+        requester: req.user,
+        ipAddress: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+      res.json({ account, changedFields: diffs.map((d) => d.field) });
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Account not found') {
+        res.status(404).json({ error: err.message });
+        return;
+      }
+      // Common case: unique-constraint violation on circuitId / customerCode / leadId / externalCrmId
+      if (
+        err &&
+        typeof err === 'object' &&
+        'code' in err &&
+        (err as { code: string }).code === 'P2002'
+      ) {
+        const target = (err as { meta?: { target?: string[] | string } }).meta?.target;
+        const fields = Array.isArray(target) ? target.join(', ') : String(target);
+        res.status(409).json({
+          error: `Another account already has that value for: ${fields}`,
+        });
         return;
       }
       throw err;

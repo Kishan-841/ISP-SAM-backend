@@ -281,7 +281,14 @@ model AuditLog {
   entityType  String   @map("entity_type")
   entityId    String   @map("entity_id") @db.Uuid
   action      String
-  performedBy String   @map("performed_by") @db.Uuid
+  /// Nullable for system / unauthenticated events (LOGIN_FAILED before a
+  /// session exists). Real authenticated actions always populate this.
+  performedBy String?  @map("performed_by") @db.Uuid
+  /// Client IP at the time of the action — sourced from X-Forwarded-For
+  /// (when behind a proxy) or the socket address. Populated by
+  /// `writeAudit` helper on every new entry.
+  ipAddress   String?  @map("ip_address")
+  userAgent   String?  @map("user_agent")
   payload     Json?
   timestamp   DateTime @default(now()) @db.Timestamptz(6)
 

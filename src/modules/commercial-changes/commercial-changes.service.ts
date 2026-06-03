@@ -105,7 +105,164 @@ function isQuickDisconnectEnabled(): boolean {
   return process.env.QUICK_DISCONNECT_ENABLED === 'true';
 }
 
+/**
+ * Admin-only input for backfilling a disconnection that already happened
+ * (typically discovered during onboarding when an imported customer is
+ * marked Active but the operator knows they were disconnected on, say,
+ * 14-Apr). No CRM round-trip, no approval queue — the event is in the
+ * past, the customer is gone, this is bookkeeping.
+ */
+export type BackfillDisconnectionInput = {
+  accountId: string;
+  /** Last billing date — used as effectiveDate and accountAppliedAt. */
+  effectiveDate: Date;
+  /** Free-text reason (from the operator's spreadsheet). Stored on the
+   *  commercial_change row so the dashboard / drill-down can show "why". */
+  reason: string;
+  performedByUserId: string;
+  ipAddress: string | null;
+  userAgent: string | null;
+};
+
+export type BackfillDisconnectionResult = {
+  commercialChange: {
+    id: string;
+    accountId: string;
+    effectiveDate: string;
+    oldArc: number;
+  };
+  account: {
+    id: string;
+    clientName: string;
+    contractStatus: string;
+  };
+};
+
 export const commercialChangesService = {
+  /**
+   * Backfill a DISCONNECTION that already happened in real life.
+   *
+   * Differs from the normal commit() flow:
+   *  - No CRM service-order created (event is in the past, CRM has its own)
+   *  - No 21-day retention window (event is in the past)
+   *  - No document attachment requirement
+   *  - retentionDecision pre-stamped as PROCEED
+   *  - accountAppliedAt stamped to effectiveDate so the dashboard waterfall
+   *    counts this as a real termination immediately
+   *  - account.contractStatus flipped to TERMINATED + currentArc=0 in the
+   *    same transaction
+   *
+   * Idempotent guards: we still allow re-runs (e.g. updating the reason),
+   * but each one creates a new row — the operator should fix dates in-place
+   * via the existing field-edit flow if they need to correct a backfill.
+   */
+  async backfillDisconnection(
+    input: BackfillDisconnectionInput,
+  ): Promise<BackfillDisconnectionResult> {
+    const account = await prisma.account.findUnique({
+      where: { id: input.accountId },
+      select: {
+        id: true,
+        clientName: true,
+        currentArc: true,
+        contractStatus: true,
+      },
+    });
+    if (!account) throw new Error('Account not found');
+
+    // Allow backfill on any non-terminated account. Operators often
+    // re-activate a wrongly-imported "Deactive" row before running backfill,
+    // so we accept ACTIVE / PENDING / EXPIRED / etc. We block TERMINATED
+    // because a terminated row already has its disconnection captured by
+    // the import or a previous backfill — re-running would double-count.
+    if (account.contractStatus === 'TERMINATED') {
+      throw new Error(
+        'ACCOUNT_ALREADY_TERMINATED: This customer is already TERMINATED. Backfilling again would double-count the disconnection in the dashboard.',
+      );
+    }
+
+    const oldArc = Number(account.currentArc);
+    const effectiveDate = startOfDayUTC(input.effectiveDate);
+    const reason = input.reason.trim();
+
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Write the commercial_change row, fully stamped as if the entire
+      //    workflow had already completed (because in reality, it has).
+      const change = await tx.commercialChange.create({
+        data: {
+          accountId: input.accountId,
+          changeType: 'DISCONNECTION',
+          oldArc,
+          newArc: 0,
+          oldBandwidthMbps: null,
+          newBandwidthMbps: null,
+          effectiveDate,
+          clientApprovalAttached: false,
+          createdBy: input.performedByUserId,
+          reason,
+          disconnectionReason: reason,
+          disconnectionMode: 'NORMAL',
+          // Pre-stamp the retention decision so the timeline view shows the
+          // customer chose PROCEED at the time of disconnection (rather than
+          // an artificial "21 days from now").
+          retentionPromptDueAt: effectiveDate,
+          retentionDecision: 'PROCEED',
+          retentionDecidedAt: effectiveDate,
+          scheduledTerminationAt: effectiveDate,
+          // Idempotency marker — set so the dashboard waterfall counts this
+          // as a real applied termination right away.
+          accountAppliedAt: effectiveDate,
+          // No CRM round-trip — record as locally-completed.
+          crmStatus: 'BACKFILL_LOCAL',
+          crmStatusUpdatedAt: new Date(),
+          activationDate: effectiveDate,
+        },
+      });
+
+      // 2. Apply to the account.
+      const updatedAccount = await tx.account.update({
+        where: { id: input.accountId },
+        data: {
+          contractStatus: 'TERMINATED',
+          currentArc: 0,
+        },
+        select: { id: true, clientName: true, contractStatus: true },
+      });
+
+      // 3. Audit trail — captures admin + IP + UA + the historical date.
+      await tx.auditLog.create({
+        data: {
+          entityType: 'CommercialChange',
+          entityId: change.id,
+          action: 'BACKFILL_DISCONNECTION',
+          performedBy: input.performedByUserId,
+          ipAddress: input.ipAddress,
+          userAgent: input.userAgent,
+          payload: {
+            accountId: input.accountId,
+            clientName: account.clientName,
+            effectiveDate: effectiveDate.toISOString().slice(0, 10),
+            oldArc,
+            reason,
+            note: 'Historical disconnection — no CRM service-order raised.',
+          },
+        },
+      });
+
+      return { change, updatedAccount };
+    });
+
+    return {
+      commercialChange: {
+        id: result.change.id,
+        accountId: result.change.accountId,
+        effectiveDate: result.change.effectiveDate.toISOString().slice(0, 10),
+        oldArc,
+      },
+      account: result.updatedAccount,
+    };
+  },
+
   async commit(input: CommitInput): Promise<CommitResult> {
     const account = await prisma.account.findUnique({
       where: { id: input.accountId },
@@ -152,10 +309,10 @@ export const commercialChangesService = {
           'QUICK_DISCONNECT_DISABLED: Quick disconnect is not enabled on this environment. Set QUICK_DISCONNECT_ENABLED=true once the CRM admin queue is live.',
         );
       }
-      const days = input.quickRequestedDays ?? 0;
-      if (!Number.isInteger(days) || days < 1 || days > QUICK_DISCONNECT_MAX_DAYS) {
+      const days = input.quickRequestedDays ?? -1;
+      if (!Number.isInteger(days) || days < 0 || days > QUICK_DISCONNECT_MAX_DAYS) {
         throw new Error(
-          `QUICK_DISCONNECT_INVALID_DAYS: quickRequestedDays must be an integer between 1 and ${QUICK_DISCONNECT_MAX_DAYS}.`,
+          `QUICK_DISCONNECT_INVALID_DAYS: quickRequestedDays must be an integer between 0 and ${QUICK_DISCONNECT_MAX_DAYS}. (0 = terminate immediately on approval.)`,
         );
       }
       const reason = (input.quickApprovalReason ?? '').trim();
@@ -305,17 +462,25 @@ export const commercialChangesService = {
 
     if (input.changeType === 'DISCONNECTION') {
       if (isQuick) {
-        // QUICK path: skip the 21-day retention. Push the request to CRM's
-        // admin queue so the super-admin can approve/reject. Account stays
-        // in PENDING_QUICK_APPROVAL until the CRM webhook lands with a
-        // decision (handled in integrations.controller.ts).
+        // QUICK path: skip the 21-day retention. Where the approval queue
+        // lives depends on the customer's kitty:
+        //   BASE → in-house SAM admin queue (/quick-approvals). No CRM call.
+        //   NEW  → CRM admin queue (existing behaviour).
+        // Both branches stamp the account PENDING_QUICK_APPROVAL.
         await enterPendingQuickApproval(result.id);
-        await notifyCrmQuickDisconnectRequested({
-          commercialChange: result,
-          account,
-          performingUser,
-        });
-        crm = { ok: 'pending-quick-approval' };
+        if (account.kittyType === 'BASE') {
+          // No outbound CRM call — SAM admin will approve/reject in-app via
+          // POST /commercial-changes/:id/sam-quick-decision.
+          crm = { ok: 'pending-quick-approval' };
+        } else {
+          // NEW kitty: existing CRM admin approval flow.
+          await notifyCrmQuickDisconnectRequested({
+            commercialChange: result,
+            account,
+            performingUser,
+          });
+          crm = { ok: 'pending-quick-approval' };
+        }
       } else {
         await enterProbableChurn(result.id);
         crm = { ok: 'probable-churn' };
@@ -567,6 +732,192 @@ export const commercialChangesService = {
    *   - PROCEED requires retentionPromptDueAt <= today (RETAIN is allowed any
    *     time — a customer can change their mind mid-window)
    */
+  /**
+   * Admin-only queue: pending QUICK-disconnect requests for BASE-kitty
+   * customers that need a SAM-admin decision. NEW kitty rows are routed
+   * to CRM (handled by the integrations webhook) and are excluded.
+   *
+   * Returned shape includes the account + the requesting SAM so the
+   * /quick-approvals page can render full context without round-trips.
+   */
+  async listPendingSamQuickApprovals() {
+    const rows = await prisma.commercialChange.findMany({
+      where: {
+        changeType: 'DISCONNECTION',
+        disconnectionMode: 'QUICK',
+        quickApprovalDecision: null,
+        account: { kittyType: 'BASE' },
+      },
+      orderBy: [{ createdAt: 'asc' }],
+      include: {
+        account: {
+          select: {
+            id: true,
+            clientName: true,
+            companyName: true,
+            customerCode: true,
+            circuitId: true,
+            kittyType: true,
+            currentArc: true,
+            contractStatus: true,
+            samOwner: { select: { id: true, name: true, email: true } },
+          },
+        },
+      },
+    });
+    return rows.map((c) => ({
+      id: c.id,
+      accountId: c.accountId,
+      oldArc: Number(c.oldArc),
+      quickRequestedDays: c.quickRequestedDays,
+      quickApprovalReason: c.quickApprovalReason,
+      disconnectionReason: c.disconnectionReason,
+      effectiveDate: c.effectiveDate.toISOString().slice(0, 10),
+      requestedAt: c.createdAt.toISOString(),
+      account: {
+        id: c.account.id,
+        clientName: c.account.clientName,
+        companyName: c.account.companyName,
+        customerCode: c.account.customerCode,
+        circuitId: c.account.circuitId,
+        kittyType: c.account.kittyType,
+        currentArc: Number(c.account.currentArc),
+        contractStatus: c.account.contractStatus,
+        samOwner: c.account.samOwner,
+      },
+    }));
+  },
+
+  /**
+   * SAM-admin decision on a pending QUICK-disconnect request (BASE kitty
+   * only — NEW kitty still routes through the CRM webhook). Mirrors what
+   * `integrations.service.ts` does on a CRM webhook approve/reject, but
+   * stays entirely in SAM: no CRM service-order raised.
+   *
+   *  - APPROVE → quickApprovalDecision=APPROVED, retentionDecision=PROCEED,
+   *              scheduledTerminationAt = today + quickRequestedDays,
+   *              account → DISCONNECTING. The lazy sweep
+   *              (sweepDueTerminations) will terminate the account when
+   *              scheduledTerminationAt hits.
+   *  - REJECT  → quickApprovalDecision=REJECTED, retentionDecision=RETAIN,
+   *              account back to ACTIVE.
+   */
+  async samQuickDecision(opts: {
+    commercialChangeId: string;
+    decision: 'APPROVE' | 'REJECT';
+    note: string | null;
+    performedByUserId: string;
+    ipAddress: string | null;
+    userAgent: string | null;
+  }) {
+    const change = await prisma.commercialChange.findUnique({
+      where: { id: opts.commercialChangeId },
+      include: { account: true },
+    });
+    if (!change) throw new Error('Commercial change not found');
+    if (change.changeType !== 'DISCONNECTION' || change.disconnectionMode !== 'QUICK') {
+      throw new Error('Not a quick-disconnect row');
+    }
+    if (change.quickApprovalDecision) {
+      throw new Error(
+        `ALREADY_DECIDED: This quick-disconnect was already ${change.quickApprovalDecision.toLowerCase()}.`,
+      );
+    }
+    if (change.account.kittyType !== 'BASE') {
+      throw new Error(
+        'NEW_BASE_NOT_LOCAL: Quick disconnects on NEW-base customers are approved via CRM admin, not in SAM.',
+      );
+    }
+
+    const decidedAt = new Date();
+    const decidedBy = opts.performedByUserId;
+    const note = opts.note?.trim() || null;
+
+    if (opts.decision === 'APPROVE') {
+      const days = change.quickRequestedDays ?? 1;
+      const scheduledTerminationAt = startOfDayUTC(addDays(new Date(), days));
+      await prisma.$transaction([
+        prisma.commercialChange.update({
+          where: { id: change.id },
+          data: {
+            quickApprovalDecision: 'APPROVED',
+            quickApprovalDecidedAt: decidedAt,
+            quickApprovalDecidedBy: decidedBy,
+            quickApprovalNote: note,
+            scheduledTerminationAt,
+            retentionDecision: 'PROCEED',
+            retentionDecidedAt: decidedAt,
+            // No CRM service-order raised. Mark the row so reports can tell
+            // it apart from a CRM-completed disconnection.
+            crmStatus: 'SAM_LOCAL_APPROVED',
+            crmStatusUpdatedAt: decidedAt,
+          },
+        }),
+        prisma.account.update({
+          where: { id: change.accountId },
+          data: { contractStatus: 'DISCONNECTING' },
+        }),
+        prisma.auditLog.create({
+          data: {
+            entityType: 'CommercialChange',
+            entityId: change.id,
+            action: 'QUICK_DISCONNECT_APPROVED',
+            performedBy: decidedBy,
+            ipAddress: opts.ipAddress,
+            userAgent: opts.userAgent,
+            payload: {
+              source: 'SAM_LOCAL',
+              decidedBy,
+              note,
+              quickRequestedDays: days,
+              scheduledTerminationAt: scheduledTerminationAt.toISOString().slice(0, 10),
+            },
+          },
+        }),
+      ]);
+    } else {
+      await prisma.$transaction([
+        prisma.commercialChange.update({
+          where: { id: change.id },
+          data: {
+            quickApprovalDecision: 'REJECTED',
+            quickApprovalDecidedAt: decidedAt,
+            quickApprovalDecidedBy: decidedBy,
+            quickApprovalNote: note,
+            retentionDecision: 'RETAIN',
+            retentionDecidedAt: decidedAt,
+            crmStatus: 'SAM_LOCAL_REJECTED',
+            crmStatusUpdatedAt: decidedAt,
+          },
+        }),
+        prisma.account.update({
+          where: { id: change.accountId },
+          data: { contractStatus: 'ACTIVE' },
+        }),
+        prisma.auditLog.create({
+          data: {
+            entityType: 'CommercialChange',
+            entityId: change.id,
+            action: 'QUICK_DISCONNECT_REJECTED',
+            performedBy: decidedBy,
+            ipAddress: opts.ipAddress,
+            userAgent: opts.userAgent,
+            payload: {
+              source: 'SAM_LOCAL',
+              decidedBy,
+              note,
+            },
+          },
+        }),
+      ]);
+    }
+
+    return prisma.commercialChange.findUniqueOrThrow({
+      where: { id: change.id },
+      include: { account: { select: { id: true, contractStatus: true } } },
+    });
+  },
+
   async retentionDecision(
     commercialChangeId: string,
     decision: 'RETAIN' | 'PROCEED',
@@ -947,6 +1298,12 @@ async function enterPendingQuickApproval(commercialChangeId: string): Promise<vo
 function startOfDayUTC(d: Date): Date {
   const out = new Date(d);
   out.setUTCHours(0, 0, 0, 0);
+  return out;
+}
+
+function addDays(d: Date, days: number): Date {
+  const out = new Date(d);
+  out.setUTCDate(out.getUTCDate() + days);
   return out;
 }
 

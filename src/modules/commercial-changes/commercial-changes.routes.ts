@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
 import { commercialChangesController } from './commercial-changes.controller.js';
-import { requireAuth } from '../auth/auth.middleware.js';
+import { requireAuth, requireRole } from '../auth/auth.middleware.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -21,6 +21,29 @@ commercialChangesRouter.get('/', commercialChangesController.list);
 commercialChangesRouter.get(
   '/disconnection-reasons',
   commercialChangesController.disconnectionReasons,
+);
+
+// ADMIN-only backfill for historical disconnections — no CRM round-trip,
+// no approval queue. Mounted BEFORE `/:id/...` routes so the static
+// path doesn't get captured as an id.
+commercialChangesRouter.post(
+  '/backfill-disconnection',
+  requireRole('ADMIN'),
+  commercialChangesController.backfillDisconnection,
+);
+
+// ADMIN-only queue + decision for BASE-kitty quick-disconnect approvals
+// that stay entirely in SAM (no CRM round-trip). NEW kitty still routes
+// to CRM admin, unchanged.
+commercialChangesRouter.get(
+  '/quick-approvals',
+  requireRole('ADMIN'),
+  commercialChangesController.listQuickApprovals,
+);
+commercialChangesRouter.post(
+  '/:id/sam-quick-decision',
+  requireRole('ADMIN'),
+  commercialChangesController.samQuickDecision,
 );
 
 commercialChangesRouter.post(

@@ -4,6 +4,7 @@ import type { CommercialChangeType } from '@prisma/client';
 import { commercialChangesService } from './commercial-changes.service.js';
 import { DISCONNECTION_REASONS } from './disconnection-reasons.js';
 import type { AuthedRequest } from '../auth/auth.middleware.js';
+import { getRequestContext } from '../../lib/request-context.js';
 
 const bodySchema = z.object({
   accountId: z.string().uuid(),
@@ -37,6 +38,19 @@ const setActivationDateSchema = z.object({
 
 const retentionDecisionSchema = z.object({
   decision: z.enum(['RETAIN', 'PROCEED']),
+});
+
+const backfillDisconnectionSchema = z.object({
+  accountId: z.string().uuid(),
+  effectiveDate: z
+    .string()
+    .refine((s) => !Number.isNaN(Date.parse(s)), 'Invalid date'),
+  reason: z.string().min(3, 'Reason is required (min 3 characters)'),
+});
+
+const samQuickDecisionSchema = z.object({
+  decision: z.enum(['APPROVE', 'REJECT']),
+  note: z.string().optional(),
 });
 
 export const commercialChangesController = {
@@ -181,6 +195,105 @@ export const commercialChangesController = {
           err.message === 'Commercial change has no CRM service-order to update')
       ) {
         res.status(400).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+  },
+
+  /**
+   * POST /commercial-changes/backfill-disconnection (ADMIN only)
+   * Record a historical disconnection — no CRM round-trip, no approval
+   * queue, no documents required. The account is flipped to TERMINATED
+   * in the same transaction and the dashboard waterfall picks it up
+   * immediately.
+   */
+  async backfillDisconnection(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const parse = backfillDisconnectionSchema.safeParse(req.body);
+    if (!parse.success) {
+      res.status(400).json({ error: parse.error.issues[0]?.message ?? 'Invalid body' });
+      return;
+    }
+    const ctx = getRequestContext(req);
+    try {
+      const result = await commercialChangesService.backfillDisconnection({
+        accountId: parse.data.accountId,
+        effectiveDate: new Date(parse.data.effectiveDate),
+        reason: parse.data.reason,
+        performedByUserId: req.user.id,
+        ipAddress: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Backfill failed';
+      if (msg === 'Account not found') {
+        res.status(404).json({ error: msg });
+        return;
+      }
+      if (msg.startsWith('ACCOUNT_ALREADY_TERMINATED')) {
+        res.status(422).json({ error: msg });
+        return;
+      }
+      throw err;
+    }
+  },
+
+  /**
+   * GET /commercial-changes/quick-approvals (ADMIN only)
+   * List pending QUICK-disconnect requests for BASE-kitty customers
+   * awaiting a SAM-admin decision.
+   */
+  async listQuickApprovals(_req: AuthedRequest, res: Response) {
+    const items = await commercialChangesService.listPendingSamQuickApprovals();
+    res.json({ items, total: items.length });
+  },
+
+  /**
+   * POST /commercial-changes/:id/sam-quick-decision (ADMIN only)
+   * Body: { decision: 'APPROVE' | 'REJECT', note?: string }
+   *
+   * SAM-internal admin decision for BASE-kitty quick-disconnect requests.
+   * No CRM round-trip — account moves to DISCONNECTING (approve) or back
+   * to ACTIVE (reject) entirely within SAM.
+   */
+  async samQuickDecision(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const parse = samQuickDecisionSchema.safeParse(req.body);
+    if (!parse.success) {
+      res.status(400).json({ error: parse.error.issues[0]?.message ?? 'Invalid body' });
+      return;
+    }
+    const ctx = getRequestContext(req);
+    try {
+      const change = await commercialChangesService.samQuickDecision({
+        commercialChangeId: req.params.id as string,
+        decision: parse.data.decision,
+        note: parse.data.note ?? null,
+        performedByUserId: req.user.id,
+        ipAddress: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+      res.json({ change });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Decision failed';
+      if (msg === 'Commercial change not found') {
+        res.status(404).json({ error: msg });
+        return;
+      }
+      if (msg.startsWith('ALREADY_DECIDED') || msg.startsWith('NEW_BASE_NOT_LOCAL')) {
+        res.status(422).json({ error: msg });
+        return;
+      }
+      if (msg === 'Not a quick-disconnect row') {
+        res.status(422).json({ error: msg });
         return;
       }
       throw err;

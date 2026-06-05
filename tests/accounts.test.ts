@@ -23,7 +23,8 @@ describe('GET /accounts', () => {
     const token = await tokenFor(admin.id, 'ADMIN');
     const res = await authedGet(app, '/accounts', token);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ accounts: [] });
+    expect(res.body.accounts).toEqual([]);
+    expect(res.body.nextCursor).toBeNull();
   });
 
   it('returns all accounts to ADMIN', async () => {

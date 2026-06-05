@@ -62,12 +62,17 @@ export const accountsController = {
     const ownerRaw = typeof req.query.owner === 'string' ? req.query.owner : undefined;
     const owner: OwnerFilter | undefined =
       ownerRaw && OWNER_FILTERS.has(ownerRaw) ? (ownerRaw as OwnerFilter) : undefined;
-    const accounts = await accountsService.list({
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
+    const limitRaw = typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined;
+    const limit = Number.isFinite(limitRaw) ? limitRaw : undefined;
+    const { accounts, nextCursor } = await accountsService.list({
       kittyType,
       owner,
       requester: req.user,
+      cursor,
+      limit,
     });
-    res.json({ accounts });
+    res.json({ accounts, nextCursor });
   },
 
   async getById(req: AuthedRequest, res: Response) {

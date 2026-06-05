@@ -578,6 +578,50 @@ export const commercialChangesService = {
     };
   },
 
+  /**
+   * Resolve which Cloudinary URL the requester is allowed to download
+   * for a given (commercial-change, kind) pair. Used by the file-proxy
+   * endpoint to gate access on the SAM side before redirecting to
+   * Cloudinary.
+   *
+   * Scoping mirrors `list()` above:
+   *   SAM       → only the account they own
+   *   SAM_HEAD  → currently sees all (matches existing list() behaviour)
+   *   ADMIN     → all
+   *
+   * Throws `Error('Commercial change not found')` for non-existent IDs
+   * AND for IDs the requester isn't allowed to see (so the controller
+   * can map both cases to 404 without leaking existence).
+   * Throws `Error('NO_FILE')` if the kind requested has no URL stored.
+   */
+  async getFileUrl(opts: {
+    commercialChangeId: string;
+    kind: 'approval' | 'po';
+    requester: Requester;
+  }): Promise<{ url: string; accountId: string }> {
+    const change = await prisma.commercialChange.findUnique({
+      where: { id: opts.commercialChangeId },
+      select: {
+        id: true,
+        accountId: true,
+        approvalFileUrl: true,
+        poFileUrl: true,
+        account: { select: { samOwnerId: true } },
+      },
+    });
+    if (!change) throw new Error('Commercial change not found');
+    if (
+      opts.requester.role === 'SAM' &&
+      change.account.samOwnerId !== opts.requester.id
+    ) {
+      // Pretend it doesn't exist — don't leak existence to non-owners.
+      throw new Error('Commercial change not found');
+    }
+    const url = opts.kind === 'approval' ? change.approvalFileUrl : change.poFileUrl;
+    if (!url) throw new Error('NO_FILE');
+    return { url, accountId: change.accountId };
+  },
+
   async list(opts: { type?: CommercialChangeType; requester: Requester }) {
     // SAMs see only their own; SAM_HEAD/ADMIN see all
     const accountWhere =

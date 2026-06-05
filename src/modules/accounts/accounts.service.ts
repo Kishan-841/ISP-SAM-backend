@@ -74,11 +74,22 @@ export const accountsService = {
     kittyType,
     owner,
     requester,
+    cursor,
+    limit,
   }: {
     kittyType?: KittyType;
     owner?: OwnerFilter;
     requester: Requester;
+    /** Account id to seek past (exclusive). Use the `nextCursor` from the
+     *  previous response. Undefined = first page. */
+    cursor?: string;
+    /** Max rows per page. Default 1000 (covers current ~700 customer
+     *  count with headroom) and hard cap 1000 to keep the JSON payload
+     *  (~1 KB/row) bounded. When the customer base crosses ~900 we'll
+     *  need to add a "Load more" cursor walker in the customers page. */
+    limit?: number;
   }) {
+    const take = Math.max(1, Math.min(1_000, limit ?? 1_000));
     const where: Prisma.AccountWhereInput = {};
     if (kittyType) where.kittyType = kittyType;
 
@@ -111,11 +122,20 @@ export const accountsService = {
       delete where.OR;
     }
 
-    return prisma.account.findMany({
+    // Cursor pagination — fetch `take + 1` so we can tell if there's
+    // another page without a separate count query. Drop the +1 row from
+    // the returned items, expose its id as `nextCursor`.
+    const rows = await prisma.account.findMany({
       where,
       include: ACCOUNT_INCLUDE,
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: take + 1,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
+    const hasMore = rows.length > take;
+    const items = hasMore ? rows.slice(0, take) : rows;
+    const nextCursor = hasMore ? items[items.length - 1]!.id : null;
+    return { accounts: items, nextCursor };
   },
 
   async getById(id: string, requester: Requester) {

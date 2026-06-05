@@ -65,6 +65,10 @@ commercialChangesRouter.post(
   commercialChangesController.commit,
 );
 
+// Auth-gated file proxy. Resolves the right Cloudinary URL after a
+// role-scoped access check and 302-redirects. Audits the download.
+commercialChangesRouter.get('/:id/file/:kind', commercialChangesController.file);
+
 commercialChangesRouter.post('/:id/refresh-status', commercialChangesController.refreshCrmStatus);
 commercialChangesRouter.post(
   '/:id/set-activation-date',

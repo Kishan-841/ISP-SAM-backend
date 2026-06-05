@@ -299,6 +299,29 @@ model AuditLog {
   @@map("audit_logs")
 }
 
+/// Cold storage for audit rows older than the retention window
+/// (default 12 months). Same shape as `AuditLog` plus an `archivedAt`
+/// timestamp. Populated by `POST /audit-logs/archive` (ADMIN). The
+/// live `audit_logs` table feeds /audit + journey queries; this table
+/// is only read for compliance / forensic deep-dives.
+model AuditLogArchive {
+  id          String   @id @db.Uuid
+  entityType  String   @map("entity_type")
+  entityId    String   @map("entity_id") @db.Uuid
+  action      String
+  performedBy String?  @map("performed_by") @db.Uuid
+  ipAddress   String?  @map("ip_address")
+  userAgent   String?  @map("user_agent")
+  payload     Json?
+  timestamp   DateTime @db.Timestamptz(6)
+  archivedAt  DateTime @default(now()) @map("archived_at") @db.Timestamptz(6)
+
+  @@index([entityType, entityId])
+  @@index([performedBy])
+  @@index([timestamp])
+  @@map("audit_logs_archive")
+}
+
 /// Per-user overlay for the notification feed. Audit log rows are global;
 /// this table records which user has read or dismissed which row. Dismissal
 /// is soft — it hides the notification from that user's feed but never

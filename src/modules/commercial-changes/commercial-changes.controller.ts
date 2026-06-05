@@ -316,6 +316,71 @@ export const commercialChangesController = {
     }
   },
 
+  /**
+   * GET /commercial-changes/:id/file/:kind  (authenticated)
+   *
+   * Auth-gated proxy to a stored Cloudinary URL. Verifies the caller can
+   * see the parent commercial-change row (same scoping as list()), then
+   * 302-redirects to the actual Cloudinary URL. Audit-logs the access
+   * so we have a trail of who downloaded what + when + from where.
+   *
+   * Switched to from the previous "raw Cloudinary URL in the HTML"
+   * approach to:
+   *   - Hide the public Cloudinary URL from rendered pages / audit-log
+   *     payloads / browser inspector (defense-in-depth)
+   *   - Add a forensic trail per download
+   *   - Allow future tightening (e.g. switching to signed URLs without
+   *     touching the UI)
+   */
+  async file(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const kindRaw = req.params.kind;
+    if (kindRaw !== 'approval' && kindRaw !== 'po') {
+      res.status(400).json({ error: 'kind must be "approval" or "po"' });
+      return;
+    }
+    try {
+      const { url, accountId } = await commercialChangesService.getFileUrl({
+        commercialChangeId: req.params.id as string,
+        kind: kindRaw,
+        requester: req.user,
+      });
+      const ctx = getRequestContext(req);
+      // Best-effort audit — don't block the download on audit-write failures.
+      await import('../../prisma.js').then(({ prisma }) =>
+        prisma.auditLog
+          .create({
+            data: {
+              entityType: 'CommercialChange',
+              entityId: req.params.id as string,
+              action: 'FILE_DOWNLOAD',
+              performedBy: req.user!.id,
+              ipAddress: ctx.ip,
+              userAgent: ctx.userAgent,
+              payload: { kind: kindRaw, accountId },
+            },
+          })
+          // eslint-disable-next-line no-console
+          .catch((e) => console.warn('[file-proxy] audit write failed', e)),
+      );
+      res.redirect(302, url);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'File access failed';
+      if (msg === 'Commercial change not found') {
+        res.status(404).json({ error: msg });
+        return;
+      }
+      if (msg === 'NO_FILE') {
+        res.status(404).json({ error: `No ${kindRaw} file attached to this change.` });
+        return;
+      }
+      throw err;
+    }
+  },
+
   async disconnectionReasons(_req: AuthedRequest, res: Response) {
     // SAM owns this taxonomy now — see modules/commercial-changes/disconnection-reasons.ts.
     // Returned with the same shape the form has always consumed, so the

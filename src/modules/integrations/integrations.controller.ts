@@ -312,4 +312,16 @@ export const integrationsController = {
     });
     res.json(data);
   },
+
+  /**
+   * GET /integrations/outbound-failures (ADMIN)
+   * Commercial-change rows whose outbound CRM call failed
+   * (`crm_status='FAILED'`). The dashboard chip + the integrations page
+   * use this so an operator can spot when SAM committed locally but the
+   * CRM hand-off didn't take.
+   */
+  async listOutboundFailures(_req: Request, res: Response) {
+    const data = await integrationsService.listOutboundCrmFailures();
+    res.json(data);
+  },
 };

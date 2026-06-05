@@ -1095,18 +1095,28 @@ export const commercialChangesService = {
  * Intentionally not a cron — running it on read keeps state convergence in a
  * single code path. The work is bounded (typically zero or a handful of rows
  * per call) and the existing accountAppliedAt marker prevents double-apply.
+ *
+ * Concurrency: PostgreSQL `FOR UPDATE SKIP LOCKED` ensures two simultaneous
+ * dashboard reads can't both pick the same due row. Worker A locks rows {1,3}
+ * and worker B sees only {2,4} — no overlap, no double-apply, no waiting on
+ * each other. The lock releases at transaction commit (the implicit
+ * autocommit on $queryRaw — fine here because applyChangeToAccount opens
+ * its own transaction for the actual write).
  */
 export async function sweepDueTerminations(): Promise<void> {
   const today = startOfDayUTC(new Date());
-  const due = await prisma.commercialChange.findMany({
-    where: {
-      changeType: 'DISCONNECTION',
-      retentionDecision: 'PROCEED',
-      scheduledTerminationAt: { lte: today },
-      accountAppliedAt: null,
-    },
-    select: { id: true },
-  });
+  // Raw query because Prisma's findMany has no native FOR UPDATE support
+  // for this case. We only need the IDs — applyChangeToAccount re-reads
+  // the row inside its own transaction and re-checks accountAppliedAt.
+  const due = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT id
+      FROM commercial_changes
+     WHERE change_type = 'DISCONNECTION'
+       AND retention_decision = 'PROCEED'
+       AND scheduled_termination_at <= ${today}
+       AND account_applied_at IS NULL
+     FOR UPDATE SKIP LOCKED
+  `;
   for (const c of due) {
     await applyChangeToAccount(c.id);
   }

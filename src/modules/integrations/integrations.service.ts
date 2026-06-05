@@ -260,6 +260,50 @@ export const integrationsService = {
    * Admin-facing list of every IntegrationEvent ever received, newest first.
    * Supports filtering by status and source, plus pagination.
    */
+  /**
+   * Outbound CRM failures: commercial-change rows where SAM committed
+   * locally but the CRM service-order call failed (`crmStatus='FAILED'`).
+   * Used by the /integrations admin page chip + drill-in so an operator
+   * can spot when SAM and CRM are out of sync and chase it manually.
+   *
+   * Excludes rows where the change has been fully RETAINed afterwards
+   * (i.e. customer was kept, so the failed CRM call is moot).
+   */
+  async listOutboundCrmFailures() {
+    const rows = await prisma.commercialChange.findMany({
+      where: { crmStatus: 'FAILED' },
+      orderBy: [{ crmStatusUpdatedAt: 'desc' }, { createdAt: 'desc' }],
+      take: 100,
+      include: {
+        account: {
+          select: {
+            id: true,
+            clientName: true,
+            companyName: true,
+            customerCode: true,
+            kittyType: true,
+            samOwner: { select: { id: true, name: true, email: true } },
+          },
+        },
+      },
+    });
+    return {
+      failures: rows.map((r) => ({
+        id: r.id,
+        accountId: r.accountId,
+        changeType: r.changeType,
+        oldArc: Number(r.oldArc),
+        newArc: Number(r.newArc),
+        effectiveDate: r.effectiveDate.toISOString().slice(0, 10),
+        crmStatus: r.crmStatus,
+        crmStatusUpdatedAt: r.crmStatusUpdatedAt?.toISOString() ?? null,
+        createdAt: r.createdAt.toISOString(),
+        account: r.account,
+      })),
+      total: rows.length,
+    };
+  },
+
   async listEvents(opts: {
     status?: 'PROCESSED' | 'DUPLICATE' | 'REJECTED' | 'FAILED';
     source?: string;

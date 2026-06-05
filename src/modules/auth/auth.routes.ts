@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import type { Request } from 'express';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { authController } from './auth.controller.js';
 import { optionalAuth, requireAuth } from './auth.middleware.js';
 
@@ -10,8 +10,11 @@ import { optionalAuth, requireAuth } from './auth.middleware.js';
  * single bad actor tries garbage. 5 attempts per 15 minutes is enough
  * headroom for a typo-prone user but stops password-spraying cold.
  *
- * Hits the LOGIN_FAILED audit log via authController BEFORE this gate
- * trips — so legitimate "wrong password" attempts still produce
+ * `ipKeyGenerator` normalises IPv6 addresses to a /56 block, preventing
+ * trivial bypass via a single IPv6-cycling attacker.
+ *
+ * The LOGIN_FAILED audit log fires inside authController BEFORE this
+ * gate trips, so legitimate "wrong password" attempts still leave a
  * forensic trail before the lock kicks in.
  */
 const loginLimiter = rateLimit({
@@ -23,7 +26,7 @@ const loginLimiter = rateLimit({
     const email = typeof req.body?.email === 'string'
       ? req.body.email.trim().toLowerCase()
       : '';
-    return `${req.ip ?? 'anon'}:${email}`;
+    return `${ipKeyGenerator(req.ip ?? '')}:${email}`;
   },
   message: { error: 'Too many login attempts. Try again in 15 minutes.' },
 });

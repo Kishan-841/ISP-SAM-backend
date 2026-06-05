@@ -50,6 +50,17 @@ integrationsRouter.get(
   integrationsController.listEvents,
 );
 
+// Admin-only: list commercial-change rows where the outbound CRM call
+// failed. Surfaces "SAM committed but CRM didn't take" cases that today
+// only show as console.warn lines + crmError in the RETENTION_PROCEEDED
+// audit payload.
+integrationsRouter.get(
+  '/outbound-failures',
+  requireAuth,
+  requireRole('ADMIN'),
+  integrationsController.listOutboundFailures,
+);
+
 /**
  * Alias router mounted at /webhooks. Exists so the CRM team can configure
  * SAM_WEBHOOK_URL with the contract's suggested path

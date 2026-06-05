@@ -876,6 +876,12 @@ export const commercialChangesService = {
         }),
       ]);
     } else {
+      // REJECT path. Defensive guard on the account update: only flip back
+      // to ACTIVE if the account is still PENDING_QUICK_APPROVAL. Without
+      // this, a race where the account has drifted to PROBABLE_CHURN or
+      // DISCONNECTING via a separate flow would have us silently
+      // resurrecting it. Prisma throws P2025 when the where doesn't match,
+      // which rolls back the whole $transaction — caller can retry.
       await prisma.$transaction([
         prisma.commercialChange.update({
           where: { id: change.id },
@@ -891,7 +897,7 @@ export const commercialChangesService = {
           },
         }),
         prisma.account.update({
-          where: { id: change.accountId },
+          where: { id: change.accountId, contractStatus: 'PENDING_QUICK_APPROVAL' },
           data: { contractStatus: 'ACTIVE' },
         }),
         prisma.auditLog.create({

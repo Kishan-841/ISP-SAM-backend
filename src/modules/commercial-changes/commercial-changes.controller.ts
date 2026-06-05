@@ -296,6 +296,22 @@ export const commercialChangesController = {
         res.status(422).json({ error: msg });
         return;
       }
+      // REJECT-path drift guard: Prisma throws P2025 when the account is
+      // no longer in PENDING_QUICK_APPROVAL by the time REJECT lands. Map
+      // to a 409 with a readable hint instead of leaking the raw Prisma
+      // stack trace.
+      if (
+        err &&
+        typeof err === 'object' &&
+        'code' in err &&
+        (err as { code: string }).code === 'P2025'
+      ) {
+        res.status(409).json({
+          error:
+            'ACCOUNT_DRIFTED: This account is no longer awaiting quick-disconnect approval (its status changed via another flow). Refresh the queue and try again.',
+        });
+        return;
+      }
       throw err;
     }
   },

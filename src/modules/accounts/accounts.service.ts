@@ -18,8 +18,13 @@ export type Requester = { id: string; role: UserRole };
 
 /**
  * Fields an admin can edit via PATCH /accounts/:id. Anything not in this
- * union (id, kittyType, samOwnerId, startOfPeriodArc, metadata, createdAt)
- * is either immutable or has its own dedicated endpoint (`/assign`).
+ * union (id, kittyType, samOwnerId, metadata, createdAt) is either
+ * immutable or has its own dedicated endpoint (`/assign`).
+ *
+ * Note: `startOfPeriodArc` is intentionally immutable from system flows
+ * (Excel import, CRM activation) but ADMINs may correct it here — same
+ * bypass pattern as `currentArc`. Every edit is audit-logged.
+ *
  *   - `undefined` = field not touched
  *   - `null`      = clear the field (where nullable)
  */
@@ -29,6 +34,7 @@ export type AccountUpdatePatch = {
   mobileNumber?: string | null;
   email?: string | null;
   currentArc?: number;
+  startOfPeriodArc?: number | null;
   contractStatus?:
     | 'ACTIVE'
     | 'EXPIRED'
@@ -410,6 +416,16 @@ export const accountsService = {
         if (Number.isFinite(next) && next !== prev) {
           data.currentArc = next as unknown as Prisma.Decimal;
           diffs.push({ field: 'currentArc', from: prev, to: next });
+        }
+      }
+      if (patch.startOfPeriodArc !== undefined) {
+        const next =
+          patch.startOfPeriodArc === null ? null : Number(patch.startOfPeriodArc);
+        const prev = before.startOfPeriodArc == null ? null : Number(before.startOfPeriodArc);
+        const valid = next === null || Number.isFinite(next);
+        if (valid && next !== prev) {
+          data.startOfPeriodArc = next as unknown as Prisma.Decimal | null;
+          diffs.push({ field: 'startOfPeriodArc', from: prev, to: next });
         }
       }
       if (patch.contractStatus !== undefined && patch.contractStatus !== before.contractStatus) {

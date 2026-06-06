@@ -21,6 +21,7 @@ const updateSchema = z.object({
   mobileNumber: optionalString,
   email: z.string().email().nullable().optional(),
   currentArc: z.number().nonnegative().optional(),
+  startOfPeriodArc: z.number().nonnegative().nullable().optional(),
   contractStatus: z
     .enum([
       'ACTIVE',

@@ -168,6 +168,68 @@ describe('PATCH /accounts/:id (admin edit)', () => {
     expect(res.status).toBe(401);
   });
 
+  it('lets admin correct startOfPeriodArc and writes a diff audit row', async () => {
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'Waterfall Co',
+      currentArc: 270000,
+      startOfPeriodArc: 240000,
+    });
+
+    const res = await request(app)
+      .patch(`/accounts/${acct.id}`)
+      .set('Cookie', cookie)
+      .send({ startOfPeriodArc: 255000 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.changedFields).toEqual(['startOfPeriodArc']);
+
+    const updated = await prisma.account.findUnique({ where: { id: acct.id } });
+    expect(Number(updated!.startOfPeriodArc)).toBe(255000);
+    // currentArc untouched
+    expect(Number(updated!.currentArc)).toBe(270000);
+
+    const audit = await prisma.auditLog.findFirst({
+      where: { entityType: 'Account', entityId: acct.id, action: 'UPDATE_FIELD' },
+    });
+    const payload = audit!.payload as { field: string; from: number; to: number };
+    expect(payload.field).toBe('startOfPeriodArc');
+    expect(payload.from).toBe(240000);
+    expect(payload.to).toBe(255000);
+  });
+
+  it('allows admin to clear startOfPeriodArc by sending null', async () => {
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({
+      clientName: 'Clearable Co',
+      startOfPeriodArc: 100000,
+    });
+
+    const res = await request(app)
+      .patch(`/accounts/${acct.id}`)
+      .set('Cookie', cookie)
+      .send({ startOfPeriodArc: null });
+
+    expect(res.status).toBe(200);
+    expect(res.body.changedFields).toEqual(['startOfPeriodArc']);
+    const updated = await prisma.account.findUnique({ where: { id: acct.id } });
+    expect(updated!.startOfPeriodArc).toBeNull();
+  });
+
+  it('rejects a negative startOfPeriodArc with 400', async () => {
+    const { cookie } = await adminCookie();
+    const acct = await seedAccount({ clientName: 'X', startOfPeriodArc: 100000 });
+
+    const res = await request(app)
+      .patch(`/accounts/${acct.id}`)
+      .set('Cookie', cookie)
+      .send({ startOfPeriodArc: -1 });
+
+    expect(res.status).toBe(400);
+    const stillX = await prisma.account.findUnique({ where: { id: acct.id } });
+    expect(Number(stillX!.startOfPeriodArc)).toBe(100000);
+  });
+
   it('captures admin IP + user-agent on each audit row', async () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({ clientName: 'A', currentArc: 100000 });

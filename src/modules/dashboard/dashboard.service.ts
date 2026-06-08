@@ -80,6 +80,9 @@ export type NewBaseMetrics = {
   // is excluded from `currentArcLakh` and reported separately as "at risk".
   probableChurn: { count: number; arcAtRiskLakh: number };
 
+  // Pending CRM settlement — see ExistingBaseMetrics.pending for the math.
+  pending: { count: number; netArcLakh: number };
+
   // Velocity (by onboardingDate)
   addedThisMonth:   { count: number; arcLakh: number };
   addedThisQuarter: { count: number; arcLakh: number };
@@ -128,6 +131,26 @@ export type ExistingBaseMetrics = {
   // and surfaced separately as "at risk" so SAM_HEAD can see how much
   // revenue is on the line — the retention queue lives at /probable-churn.
   probableChurn: { count: number; arcAtRiskLakh: number };
+
+  /**
+   * Reconciliation block for the waterfall. The upgrades / downgrades buckets
+   * count EVERY committed commercial change (whether or not CRM has applied
+   * it to the account yet), while `currentArcLakh` only reflects changes
+   * CRM has marked COMPLETED. That asymmetry — documented in CLAUDE.md
+   * convention #3 — means the waterfall sum and the Current ARC card can
+   * differ slightly while CRM workflow items are in flight.
+   *
+   *   netArcLakh = currentArcLakh − (start + upgrades − downgrades − terminations)
+   *
+   * When non-zero, the dashboard surfaces it as a "Pending CRM settlement"
+   * row in the Waterfall — Detail table so the two views reconcile.
+   */
+  pending: {
+    /** Number of commercial changes currently in CRM workflow (not yet applied). */
+    count: number;
+    /** Net ARC adjustment in lakhs to bring the waterfall end to live Current ARC. */
+    netArcLakh: number;
+  };
 };
 
 const LAKH = 100_000;
@@ -270,6 +293,22 @@ export const dashboardService = {
       terminatedCount = liveTerminated;
     }
 
+    // Pending CRM settlement — counts every committed change that's still
+    // in CRM workflow (accountAppliedAt null). The netArc is the adjustment
+    // needed to make the waterfall sum match the live currentArc; it
+    // captures pending UP/DOWN/DISC plus the probable-churn exclusion in
+    // one number, so the UI can render a single "Pending" row.
+    const pendingCount = changes.filter(
+      (c) =>
+        !c.accountAppliedAt &&
+        (c.changeType === 'UPGRADE' ||
+          c.changeType === 'DOWNGRADE' ||
+          c.changeType === 'DISCONNECTION'),
+    ).length;
+    const waterfallEndArc =
+      startArc + upgradesArcAdded - downgradesArcReduced - terminationsArcLost;
+    const pendingNetArc = currentArc - waterfallEndArc;
+
     return {
       totalCustomers,
       totalBaseArcLakh: roundLakh(startArc / LAKH),
@@ -291,6 +330,10 @@ export const dashboardService = {
       terminations: {
         count: terminationsCount,
         arcLostLakh: roundLakh(terminationsArcLost / LAKH),
+      },
+      pending: {
+        count: pendingCount,
+        netArcLakh: roundLakh(pendingNetArc / LAKH),
       },
       probableChurn: {
         count: probableChurnAccounts.length,
@@ -559,6 +602,19 @@ export async function computeNewBase(
     contractStatus: a.contractStatus,
   }));
 
+  // Pending CRM settlement (same math as existingBase — see that comment).
+  // Adjustment to reconcile the waterfall end with the live currentArc.
+  const newBasePendingCount = changes.filter(
+    (c) =>
+      !c.accountAppliedAt &&
+      (c.changeType === 'UPGRADE' ||
+        c.changeType === 'DOWNGRADE' ||
+        c.changeType === 'DISCONNECTION'),
+  ).length;
+  const newBaseWaterfallEndArc =
+    totalNewArc + upgradesArcAdded - downgradesArcReduced - terminationsArcLost;
+  const newBasePendingNetArc = currentArc - newBaseWaterfallEndArc;
+
   return {
     totalCustomers,
     totalNewArcLakh: roundLakh(totalNewArc / LAKH),
@@ -580,6 +636,10 @@ export async function computeNewBase(
     terminations: {
       count: terminationsCount,
       arcLostLakh: roundLakh(terminationsArcLost / LAKH),
+    },
+    pending: {
+      count: newBasePendingCount,
+      netArcLakh: roundLakh(newBasePendingNetArc / LAKH),
     },
     probableChurn: {
       count: probableChurnAccounts.length,

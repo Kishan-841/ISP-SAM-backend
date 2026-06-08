@@ -314,6 +314,73 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
   });
 });
 
+describe('GET /dashboard/existing-base — pending CRM reconciliation', () => {
+  it('reports pending.netArc as the gap between waterfall buckets and live currentArc', async () => {
+    const admin = await seedUser({ email: 'pending@x.com', role: 'ADMIN' });
+    // Account is at ARC 6L (no change applied yet on the account row).
+    // We seed a DOWNGRADE 6L → 4.8L with accountAppliedAt left null —
+    // the bucket counts it (-1.2L) but currentArc still reflects the
+    // pre-downgrade 6L.
+    const acct = await seedAccount({
+      kittyType: 'BASE',
+      currentArc: 600000,
+      startOfPeriodArc: 600000,
+      contractStatus: 'ACTIVE',
+    });
+    await prisma.commercialChange.create({
+      data: {
+        accountId: acct.id,
+        changeType: 'DOWNGRADE',
+        oldArc: 600000,
+        newArc: 480000,
+        effectiveDate: new Date('2026-05-01'),
+        clientApprovalAttached: true,
+        createdBy: admin.id,
+        // accountAppliedAt intentionally null — pending CRM workflow.
+      },
+    });
+
+    const token = await tokenFor(admin.id, 'ADMIN');
+    const res = await authedGet(app, '/dashboard/existing-base', token);
+
+    // currentArc reflects only applied changes (still 6L).
+    expect(res.body.currentArcLakh).toBeCloseTo(6, 1);
+    // Downgrade bucket includes the pending row (-1.2L).
+    expect(res.body.downgrades.arcReducedLakh).toBeCloseTo(1.2, 1);
+    // Pending block: 1 in-flight row, +1.2L adjustment (the bucket "took
+    // away" 1.2L the account hasn't actually lost yet).
+    expect(res.body.pending.count).toBe(1);
+    expect(res.body.pending.netArcLakh).toBeCloseTo(1.2, 1);
+  });
+
+  it('pending.netArc is ~0 when every committed change has been applied', async () => {
+    const admin = await seedUser({ email: 'applied@x.com', role: 'ADMIN' });
+    const acct = await seedAccount({
+      kittyType: 'BASE',
+      currentArc: 720000,         // already at upgraded value
+      startOfPeriodArc: 600000,
+    });
+    await prisma.commercialChange.create({
+      data: {
+        accountId: acct.id,
+        changeType: 'UPGRADE',
+        oldArc: 600000,
+        newArc: 720000,
+        effectiveDate: new Date('2026-04-15'),
+        clientApprovalAttached: true,
+        createdBy: admin.id,
+        accountAppliedAt: new Date('2026-04-20'), // applied
+      },
+    });
+
+    const token = await tokenFor(admin.id, 'ADMIN');
+    const res = await authedGet(app, '/dashboard/existing-base', token);
+
+    expect(res.body.pending.count).toBe(0);
+    expect(res.body.pending.netArcLakh).toBeCloseTo(0, 1);
+  });
+});
+
 describe('GET /dashboard/existing-base — quarter filter', () => {
   async function seedAcctWithChange(opts: {
     admin: { id: string };

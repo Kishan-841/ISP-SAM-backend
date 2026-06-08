@@ -104,7 +104,10 @@ describe('POST /commercial-changes', () => {
     expect(res.status).toBe(404);
   });
 
-  it('422 when file extension is not .eml/.msg/.pdf', async () => {
+  it('accepts any file extension (no allowlist; size cap is the only limit)', async () => {
+    // The old behavior allow-listed .eml/.msg/.pdf and 422'd anything else.
+    // Product asked to drop the allowlist so SAMs can attach scans, screenshots,
+    // Word docs, etc. — anything the customer actually sent them.
     const { cookie } = await adminCookie();
     const acct = await seedAccount({ clientName: 'Acme', currentArc: 600000 });
     const res = await request(app)
@@ -115,7 +118,8 @@ describe('POST /commercial-changes', () => {
       .field('newArc', '720000')
       .field('effectiveDate', '2026-05-01')
       .attach('approvalFile', PDF_BUFFER, 'approval.txt');
-    expect(res.status).toBe(422);
+    // 201 (or any non-4xx) — the upload no longer fails on extension.
+    expect([200, 201]).toContain(res.status);
   });
 
   it('accepts approval-only (PO not attached)', async () => {

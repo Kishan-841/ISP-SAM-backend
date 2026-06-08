@@ -3,15 +3,16 @@ import multer from 'multer';
 import { commercialChangesController } from './commercial-changes.controller.js';
 import { requireAuth, requireRole } from '../auth/auth.middleware.js';
 
+// Attachments — any file format up to 10 MB. We deliberately do not
+// allow-list extensions: SAMs receive customer approvals as emails,
+// PDFs, Word docs, screenshots, scans, and the occasional spreadsheet
+// or zip. Files are stored in Cloudinary and served back through the
+// auth-gated /commercial-changes/:id/file proxy, so the XSS / script
+// surface is contained even for HTML-ish uploads. The 10 MB cap stays
+// to keep Cloudinary egress + memory usage bounded.
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    const allowed = ['.eml', '.msg', '.pdf'];
-    const ext = (file.originalname.match(/\.[^.]+$/) ?? [''])[0].toLowerCase();
-    if (allowed.includes(ext)) cb(null, true);
-    else cb(new Error('Attachments must be .eml, .msg or .pdf'));
-  },
 });
 
 export const commercialChangesRouter = Router();

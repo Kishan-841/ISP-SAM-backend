@@ -141,7 +141,13 @@ export const accountsService = {
     const hasMore = rows.length > take;
     const items = hasMore ? rows.slice(0, take) : rows;
     const nextCursor = hasMore ? items[items.length - 1]!.id : null;
-    return { accounts: items, nextCursor };
+
+    // For terminated rows, attach `lastDisconnectionArc` — the ARC the
+    // customer was paying right before they walked. Helps the customers
+    // list show "was ₹2.7Cr" instead of a uniform ₹0 across every
+    // terminated row. One query for the whole page (not per-row).
+    const itemsWithLost = await attachLastDisconnectionArc(items);
+    return { accounts: itemsWithLost, nextCursor };
   },
 
   async getById(id: string, requester: Requester) {
@@ -153,7 +159,8 @@ export const accountsService = {
     if (requester.role === 'SAM' && account.samOwnerId !== requester.id) {
       return null; // Pretend it doesn't exist — don't leak existence to non-owners.
     }
-    return account;
+    const [withLost] = await attachLastDisconnectionArc([account]);
+    return withLost ?? account;
   },
 
   /**
@@ -544,4 +551,55 @@ async function listReportIds(headId: string): Promise<string[]> {
     select: { id: true },
   });
   return reports.map((r) => r.id);
+}
+
+/**
+ * For each TERMINATED account in the list, attach `lastDisconnectionArc`
+ * — the `oldArc` from the disconnection commercial change that actually
+ * terminated them (`accountAppliedAt IS NOT NULL`). Non-terminated rows
+ * pass through unchanged with `lastDisconnectionArc: null`.
+ *
+ * One query for the whole page (filtered by accountId IN (...)), then
+ * an in-memory join. Picks the most recent applied disconnection if a
+ * single account has multiple (e.g. retention reversed-then-re-committed).
+ */
+type AccountRow = Awaited<
+  ReturnType<typeof prisma.account.findMany>
+>[number];
+
+async function attachLastDisconnectionArc<T extends AccountRow>(
+  rows: T[],
+): Promise<Array<T & { lastDisconnectionArc: number | null }>> {
+  const terminatedIds = rows
+    .filter((r) => r.contractStatus === 'TERMINATED')
+    .map((r) => r.id);
+
+  if (terminatedIds.length === 0) {
+    return rows.map((r) => ({ ...r, lastDisconnectionArc: null }));
+  }
+
+  const discos = await prisma.commercialChange.findMany({
+    where: {
+      accountId: { in: terminatedIds },
+      changeType: 'DISCONNECTION',
+      accountAppliedAt: { not: null },
+    },
+    select: { accountId: true, oldArc: true, accountAppliedAt: true },
+    orderBy: { accountAppliedAt: 'desc' },
+  });
+  // Pick the latest applied disconnection per account.
+  const lostByAccount = new Map<string, number>();
+  for (const d of discos) {
+    if (!lostByAccount.has(d.accountId)) {
+      lostByAccount.set(d.accountId, Number(d.oldArc));
+    }
+  }
+
+  return rows.map((r) => ({
+    ...r,
+    lastDisconnectionArc:
+      r.contractStatus === 'TERMINATED'
+        ? lostByAccount.get(r.id) ?? null
+        : null,
+  }));
 }

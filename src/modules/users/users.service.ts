@@ -7,6 +7,8 @@ export type UserUpdatePatch = {
   role?: UserRole;
   /** Pass `null` to clear samHeadId, omit to leave unchanged. */
   samHeadId?: string | null;
+  /** Per-SAM allowable churn ceiling (range-validated 6.00–8.00 at the API). */
+  allowableChurnPercent?: number;
 };
 
 export const usersService = {
@@ -85,6 +87,10 @@ export const usersService = {
           ? { disconnect: true }
           : { connect: { id: opts.patch.samHeadId } };
     }
+    if (opts.patch.allowableChurnPercent !== undefined) {
+      data.allowableChurnPercent =
+        opts.patch.allowableChurnPercent as unknown as Prisma.Decimal;
+    }
     const willResetPassword = !!opts.newPassword;
     if (willResetPassword) {
       data.passwordHash = await authService.hashPassword(opts.newPassword!);
@@ -101,16 +107,19 @@ export const usersService = {
         name: before.name,
         role: before.role,
         samHeadId: before.samHeadId,
+        allowableChurnPercent: Number(before.allowableChurnPercent),
       };
       const afterSnap = {
         name: updated.name,
         role: updated.role,
         samHeadId: updated.samHeadId,
+        allowableChurnPercent: Number(updated.allowableChurnPercent),
       };
       const fieldChanged =
         beforeSnap.name !== afterSnap.name ||
         beforeSnap.role !== afterSnap.role ||
-        beforeSnap.samHeadId !== afterSnap.samHeadId;
+        beforeSnap.samHeadId !== afterSnap.samHeadId ||
+        beforeSnap.allowableChurnPercent !== afterSnap.allowableChurnPercent;
 
       if (fieldChanged) {
         await tx.auditLog.create({

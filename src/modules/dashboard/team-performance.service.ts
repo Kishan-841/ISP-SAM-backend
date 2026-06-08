@@ -25,6 +25,21 @@ export type SamRow = {
   customersWithoutMeeting: number;
   /** Reliability composite (revenue / MOM / compliance / onboarding) — 0–100. */
   reliabilityScore: number;
+  // ── Incentive / allowable-churn block ─────────────────────────────────
+  //   Net churn ARC = (disconnections + downgrades − upgrades). Positive
+  //   means the book shrank; negative means the SAM grew it. The percent
+  //   is denominated in start-of-period ARC so it's stable across the
+  //   period. Headroom = allowable − actual; positive means under budget.
+  /** ₹ net churn = disconnections + downgrades − upgrades (positive = loss). */
+  netChurnArc: number;
+  /** netChurnArc / startOfPeriodArc * 100 (rounded to 2 dp). */
+  netChurnPercent: number;
+  /** Per-SAM allowable churn ceiling (6.00–8.00, enforced at the API layer). */
+  allowableChurnPercent: number;
+  /** allowableChurnPercent − netChurnPercent. Positive = under budget = on-track for incentive. */
+  churnHeadroomPercent: number;
+  /** 'under_budget' when netChurnPercent ≤ allowableChurnPercent, else 'over_budget'. */
+  churnStatus: 'under_budget' | 'over_budget';
 };
 
 export type TeamPerformance = {
@@ -42,6 +57,15 @@ export type TeamPerformance = {
     meetingsHeld: number;
     activationPending: number;
     customersWithoutMeeting30d: number;
+    /** Team-wide net churn ₹ — sum of per-SAM netChurnArc. */
+    netChurnArc: number;
+    /** netChurnArc / sum(startOfPeriodArc) * 100. */
+    netChurnPercent: number;
+    /** ARC-weighted allowable churn across the team (sums to a coherent budget). */
+    allowableChurnPercent: number;
+    /** allowableChurnPercent − netChurnPercent. */
+    churnHeadroomPercent: number;
+    samsOverBudget: number;
   };
   sams: SamRow[];
 };
@@ -71,7 +95,7 @@ export async function computeTeamPerformance({
       requester.role === 'SAM_HEAD'
         ? { role: 'SAM', samHeadId: requester.id }
         : { role: 'SAM' },
-    select: { id: true, name: true, email: true },
+    select: { id: true, name: true, email: true, allowableChurnPercent: true },
     orderBy: { name: 'asc' },
   });
   const samIds = sams.map((s) => s.id);
@@ -92,6 +116,11 @@ export async function computeTeamPerformance({
         meetingsHeld: 0,
         activationPending: 0,
         customersWithoutMeeting30d: 0,
+        netChurnArc: 0,
+        netChurnPercent: 0,
+        allowableChurnPercent: 0,
+        churnHeadroomPercent: 0,
+        samsOverBudget: 0,
       },
       sams: [],
     };
@@ -250,6 +279,26 @@ export async function computeTeamPerformance({
       hasNewKittyAccounts: samAccounts.some((a) => a.kittyType === 'NEW'),
     });
 
+    // ── Allowable-churn / incentive math ───────────────────────────────
+    //   Per the product rule, "churn" is the NET ARC delta — every rupee
+    //   gained on an upgrade offsets a rupee lost to a downgrade or
+    //   disconnection. Rate revisions are zero-delta by definition so they
+    //   don't enter the calculation. The denominator is start-of-period
+    //   ARC, which doesn't move during the period.
+    //
+    //   Sign convention: a POSITIVE netChurnPercent means the book shrank
+    //   (loss), a NEGATIVE means it grew. The "ceiling" check is therefore
+    //   `netChurnPercent <= allowableChurnPercent` — any growth or low
+    //   loss is within budget.
+    const netChurnArc =
+      changeBuckets.DISCONNECTION.arcImpact +
+      changeBuckets.DOWNGRADE.arcImpact -
+      changeBuckets.UPGRADE.arcImpact;
+    const netChurnPercent =
+      startOfPeriodArc > 0 ? (netChurnArc / startOfPeriodArc) * 100 : 0;
+    const allowableChurnPercent = Number(s.allowableChurnPercent);
+    const churnHeadroomPercent = allowableChurnPercent - netChurnPercent;
+
     return {
       userId: s.id,
       name: s.name,
@@ -268,6 +317,11 @@ export async function computeTeamPerformance({
       activationPending,
       customersWithoutMeeting,
       reliabilityScore: round1(reliabilityScore),
+      netChurnArc: round0(netChurnArc),
+      netChurnPercent: round2(netChurnPercent),
+      allowableChurnPercent: round2(allowableChurnPercent),
+      churnHeadroomPercent: round2(churnHeadroomPercent),
+      churnStatus: netChurnPercent <= allowableChurnPercent ? 'under_budget' : 'over_budget',
     };
   });
 
@@ -300,6 +354,24 @@ export async function computeTeamPerformance({
     return !last || now - last > THIRTY_DAYS_MS;
   }).length;
 
+  // Team-wide churn aggregates.
+  //  - netChurnArc and the percent denominator both sum across SAMs, so the
+  //    team netChurnPercent is naturally ARC-weighted.
+  //  - For the team allowable %, we weight each SAM's allowable by their
+  //    own startOfPeriodArc. A SAM with a big book influences the team
+  //    budget more than a SAM with a small one — same weighting rationale
+  //    as how we compute the team-wide churn rate.
+  const teamNetChurnArc = samRows.reduce((s, r) => s + r.netChurnArc, 0);
+  const teamNetChurnPercent =
+    teamStartArc > 0 ? (teamNetChurnArc / teamStartArc) * 100 : 0;
+  const teamAllowableNumerator = samRows.reduce(
+    (s, r) => s + r.allowableChurnPercent * r.startOfPeriodArc,
+    0,
+  );
+  const teamAllowableChurnPercent =
+    teamStartArc > 0 ? teamAllowableNumerator / teamStartArc : 0;
+  const samsOverBudget = samRows.filter((r) => r.churnStatus === 'over_budget').length;
+
   return {
     team: {
       headId: requester.id,
@@ -315,6 +387,11 @@ export async function computeTeamPerformance({
       meetingsHeld: teamMeetingsHeld,
       activationPending: teamActivationPending,
       customersWithoutMeeting30d,
+      netChurnArc: round0(teamNetChurnArc),
+      netChurnPercent: round2(teamNetChurnPercent),
+      allowableChurnPercent: round2(teamAllowableChurnPercent),
+      churnHeadroomPercent: round2(teamAllowableChurnPercent - teamNetChurnPercent),
+      samsOverBudget,
     },
     sams: samRows,
   };
@@ -330,6 +407,10 @@ function round0(n: number): number {
 
 function round1(n: number): number {
   return Math.round(n * 10) / 10;
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
 }
 
 function bucketsToRoundedNumbers(
@@ -455,6 +536,19 @@ export type SamDetail = {
     staleMoms: number;
     day21Prompts: number;
   };
+  /**
+   * Allowable-churn / incentive block. `netChurnPercent` uses the same
+   * net-of-upgrades definition as the SamRow on the team table — keep the
+   * formula consistent so the team-table summary and this detail view
+   * never disagree.
+   */
+  churn: {
+    netChurnArc: number;
+    netChurnPercent: number;
+    allowableChurnPercent: number;
+    churnHeadroomPercent: number;
+    churnStatus: 'under_budget' | 'over_budget';
+  };
 };
 
 /**
@@ -492,6 +586,7 @@ export async function computeSamDetail({
       email: true,
       role: true,
       samHeadId: true,
+      allowableChurnPercent: true,
       samHead: { select: { name: true } },
     },
   });
@@ -802,6 +897,25 @@ export async function computeSamDetail({
       staleMoms,
       day21Prompts,
     },
+    churn: (() => {
+      const netChurnArc =
+        self.changes.DISCONNECTION.arcImpact +
+        self.changes.DOWNGRADE.arcImpact -
+        self.changes.UPGRADE.arcImpact;
+      const netChurnPercent =
+        self.startOfPeriodArc > 0 ? (netChurnArc / self.startOfPeriodArc) * 100 : 0;
+      const allowable = Number(sam.allowableChurnPercent);
+      return {
+        netChurnArc: round0(netChurnArc),
+        netChurnPercent: round2(netChurnPercent),
+        allowableChurnPercent: round2(allowable),
+        churnHeadroomPercent: round2(allowable - netChurnPercent),
+        churnStatus:
+          netChurnPercent <= allowable
+            ? ('under_budget' as const)
+            : ('over_budget' as const),
+      };
+    })(),
   };
 }
 

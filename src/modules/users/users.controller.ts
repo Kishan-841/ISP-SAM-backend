@@ -19,6 +19,17 @@ const updateSchema = z.object({
   samHeadId: z.string().uuid().nullable().optional(),
   /** When present, admin is resetting the user's password. */
   password: z.string().min(6).optional(),
+  /**
+   * Per-SAM allowable churn budget (incentive ceiling). Constrained to the
+   * 6.00–8.00 product range. Stored on every User row but only meaningful
+   * when role = SAM; validation here doesn't enforce role since the value
+   * is harmless on non-SAM rows and may be tuned ahead of role change.
+   */
+  allowableChurnPercent: z
+    .number()
+    .min(6, { message: 'allowableChurnPercent must be ≥ 6.00' })
+    .max(8, { message: 'allowableChurnPercent must be ≤ 8.00' })
+    .optional(),
 });
 
 function publicUser(u: {
@@ -27,6 +38,7 @@ function publicUser(u: {
   name: string;
   role: string;
   createdAt: Date;
+  allowableChurnPercent?: unknown;
   samHead?: { id: string; name: string } | null;
 }) {
   return {
@@ -35,6 +47,10 @@ function publicUser(u: {
     name: u.name,
     role: u.role,
     createdAt: u.createdAt,
+    // Decimal serialises as string out of Prisma — coerce to number so the
+    // shape matches the editable input on the frontend.
+    allowableChurnPercent:
+      u.allowableChurnPercent == null ? null : Number(u.allowableChurnPercent),
     samHead: u.samHead ?? null,
   };
 }
@@ -154,6 +170,7 @@ export const usersController = {
           name: data.name,
           role: data.role,
           samHeadId: data.samHeadId,
+          allowableChurnPercent: data.allowableChurnPercent,
         },
         newPassword: data.password,
         performedByUserId: req.user.id,

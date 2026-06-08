@@ -386,6 +386,13 @@ model User {
   reports      User[]   @relation("SamHeadHierarchy")
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
+  // Allowable churn budget for incentive calculation — net ARC churn % the
+  // SAM is allowed to lose before incentive is at risk. Constrained to
+  // 6.00 ≤ value ≤ 8.00 at the application layer (see users.controller.ts).
+  // Stored on the User (not a global config) so SAM_HEADs can tier their
+  // team. Only used when role = SAM; harmless on other roles.
+  allowableChurnPercent Decimal @default(7.00) @map("allowable_churn_percent") @db.Decimal(4, 2)
+
   ownedAccounts      Account[]           @relation("SamOwner")
   notificationStates NotificationState[]
   samLeadDispatches  SamLeadDispatch[]

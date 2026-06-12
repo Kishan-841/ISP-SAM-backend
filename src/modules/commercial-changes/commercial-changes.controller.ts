@@ -2,9 +2,16 @@ import type { Response } from 'express';
 import { z } from 'zod';
 import type { CommercialChangeType } from '@prisma/client';
 import { commercialChangesService } from './commercial-changes.service.js';
+import { bulkImportService } from './bulk-import/bulk-import.service.js';
 import { DISCONNECTION_REASONS } from './disconnection-reasons.js';
 import type { AuthedRequest } from '../auth/auth.middleware.js';
 import { getRequestContext } from '../../lib/request-context.js';
+
+type UploadedFile = {
+  buffer: Buffer;
+  originalname?: string;
+  size?: number;
+};
 
 const bodySchema = z.object({
   accountId: z.string().uuid(),
@@ -240,6 +247,47 @@ export const commercialChangesController = {
         return;
       }
       throw err;
+    }
+  },
+
+  /**
+   * POST /commercial-changes/bulk-import (ADMIN only)
+   *
+   * Bulk import of commercial changes from an Excel workbook. Each row
+   * commits a single UPGRADE / DOWNGRADE / RATE_REVISION / DISCONNECTION
+   * directly against an account (no CRM round-trip, no documents).
+   * Partial-success: invalid rows go into `errors[]`, valid rows commit.
+   * Auth-gated to ADMIN at the route layer.
+   *
+   * Multipart field name: `file` (one .xlsx / .xls / .csv up to 10 MB).
+   */
+  async bulkImport(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const file = (
+      req as AuthedRequest & { file?: UploadedFile }
+    ).file;
+    if (!file) {
+      res.status(422).json({ error: 'No file uploaded under field name "file".' });
+      return;
+    }
+    const ctx = getRequestContext(req);
+    try {
+      const summary = await bulkImportService.importWorkbook({
+        buffer: file.buffer,
+        performedByUserId: req.user.id,
+        ipAddress: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+      res.status(200).json(summary);
+    } catch (err) {
+      // Any exception out of importWorkbook is a parser/structural failure
+      // (bad workbook, malformed sheet) — surface it but don't 500.
+      res.status(422).json({
+        error: err instanceof Error ? err.message : 'Bulk import failed',
+      });
     }
   },
 

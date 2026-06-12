@@ -33,6 +33,25 @@ commercialChangesRouter.post(
   commercialChangesController.backfillDisconnection,
 );
 
+// ADMIN-only bulk-import: one Excel file → many commercial changes. No
+// CRM round-trip, no document gate (matches backfill-disconnection
+// semantics). Multipart field name: `file`. Same 10 MB size cap as the
+// per-row commit.
+commercialChangesRouter.post(
+  '/bulk-import',
+  requireRole('ADMIN'),
+  (req, res, next) => {
+    upload.single('file')(req, res, (err) => {
+      if (err) {
+        res.status(422).json({ error: err.message });
+        return;
+      }
+      next();
+    });
+  },
+  commercialChangesController.bulkImport,
+);
+
 // ADMIN-only queue + decision for BASE-kitty quick-disconnect approvals
 // that stay entirely in SAM (no CRM round-trip). NEW kitty still routes
 // to CRM admin, unchanged.

@@ -1,0 +1,5 @@
+Circuit ID,Change Type,New ARC,New Bandwidth,Effective Date,Disconnection Reason,Reason
+CKT-100,UPGRADE,800000,500,2026-05-15,,Customer requested speed bump
+CKT-101,DOWNGRADE,300000,100,2026-05-16,,Cost cutting
+CKT-102,RATE_REVISION,500000,200,2026-05-17,,Better plan at same ARC
+CKT-103,DISCONNECTION,,,2026-05-18,office-closed,Customer closed Pune office

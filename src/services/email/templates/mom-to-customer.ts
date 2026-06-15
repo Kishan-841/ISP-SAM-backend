@@ -158,6 +158,12 @@ function plainTextVersion(input: MomToCustomerInput): string {
   }
   lines.push('');
 
+  // Body (momContent) goes FIRST — mirrors the HTML reorder.
+  if (input.momContent.trim()) {
+    lines.push(input.momContent.trim());
+    lines.push('');
+  }
+
   const allPpts = [
     ...input.clientParticipants.map((p) => ({
       ...p,
@@ -183,10 +189,6 @@ function plainTextVersion(input: MomToCustomerInput): string {
     lines.push('');
   }
 
-  if (input.momContent.trim()) {
-    lines.push(input.momContent.trim());
-    lines.push('');
-  }
   lines.push('Thank you for your time. Please feel free to reach out for any clarifications.');
   lines.push('');
   lines.push('Best Regards,');
@@ -235,6 +237,11 @@ export function buildMomToCustomerEmail(input: MomToCustomerInput): {
   const actionItemsHtml = renderActionItemsTable(input.actionItems);
   const bodyHtml = input.momContent.trim() ? plainBodyToHtml(input.momContent) : '';
 
+  // Body (momContent) is rendered BEFORE the participants and action-items
+  // tables — it's the SAM's salutation and intro, so it should sit at the
+  // top of the email above the structured tables. Per product feedback:
+  // readers want to see "Dear X, here's the summary" first, then scroll to
+  // the tabular details.
   const bodyFragment = `
     <tr>
       <td style="padding:0;background:#ea580c;">
@@ -250,10 +257,10 @@ export function buildMomToCustomerEmail(input: MomToCustomerInput): {
           ${detailRows.join('')}
         </table>
 
+        ${bodyHtml ? `<div style="margin:0 0 24px;font-size:14px;color:#374151;line-height:1.6;">${bodyHtml}</div>` : ''}
+
         ${participantsHtml}
         ${actionItemsHtml}
-
-        ${bodyHtml ? `<div style="margin:18px 0 0;">${bodyHtml}</div>` : ''}
 
         <p style="margin:24px 0 0;font-size:14px;color:#374151;line-height:1.6;">
           Thank you for your time. Please feel free to reach out for any clarifications.

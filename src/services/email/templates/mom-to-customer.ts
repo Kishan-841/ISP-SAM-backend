@@ -1,5 +1,5 @@
 import type { Account, MeetingType } from '@prisma/client';
-import { escapeHtml, plainBodyToHtml, wrapEmailShell } from './_helpers.js';
+import { escapeHtml, plainBodyToHtml } from './_helpers.js';
 
 export type Participant = { name: string; position?: string };
 
@@ -236,57 +236,93 @@ export function buildMomToCustomerEmail(input: MomToCustomerInput): {
   );
   const actionItemsHtml = renderActionItemsTable(input.actionItems);
   const bodyHtml = input.momContent.trim() ? plainBodyToHtml(input.momContent) : '';
+  const preheader = `Minutes of meeting on ${formatDate(heldOrScheduled)} — ${customerName}`;
 
-  // Body (momContent) is rendered BEFORE the participants and action-items
-  // tables — it's the SAM's salutation and intro, so it should sit at the
-  // top of the email above the structured tables. Per product feedback:
-  // readers want to see "Dear X, here's the summary" first, then scroll to
-  // the tabular details.
-  const bodyFragment = `
-    <tr>
-      <td style="padding:0;background:#ea580c;">
-        <div style="padding:28px 32px;">
-          <div style="font-size:22px;font-weight:700;color:#ffffff;letter-spacing:-0.01em;">Minutes of Meeting</div>
-          <div style="margin-top:8px;font-size:14px;color:#ffedd5;">${escapeHtml(customerName)}</div>
-        </div>
-      </td>
-    </tr>
-    <tr>
-      <td style="padding:28px 32px;background:#ffffff;">
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:24px;">
-          ${detailRows.join('')}
+  // Custom shell (replaces `wrapEmailShell`) — the SAM's body text sits as a
+  // plain unstyled text block ABOVE the styled card so the email reads like
+  // a normal personal note that happens to be followed by a structured
+  // attachment. The card below holds the orange header, date/time/type,
+  // participants and action-items tables, signature and the SAM footer.
+  // Per product feedback: readers were finding the body too "buried" inside
+  // the orange-bordered card.
+  const html = `
+<!DOCTYPE html>
+<html>
+  <body style="margin:0;padding:0;background:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+    <span style="display:none;max-height:0;overflow:hidden;color:#f9fafb;">${escapeHtml(preheader)}</span>
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f9fafb;padding:24px 0;">
+      <tr><td align="center">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width:600px;">
+
+          ${
+            bodyHtml
+              ? `
+          <tr>
+            <td style="padding:8px 4px 20px;font-size:14px;color:#111827;line-height:1.6;">
+              ${bodyHtml}
+            </td>
+          </tr>`
+              : ''
+          }
+
+          <tr>
+            <td style="padding:0;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
+
+                <tr>
+                  <td style="padding:0;background:#ea580c;">
+                    <div style="padding:28px 32px;">
+                      <div style="font-size:22px;font-weight:700;color:#ffffff;letter-spacing:-0.01em;">Minutes of Meeting</div>
+                      <div style="margin-top:8px;font-size:14px;color:#ffedd5;">${escapeHtml(customerName)}</div>
+                    </div>
+                  </td>
+                </tr>
+
+                <tr>
+                  <td style="padding:28px 32px;background:#ffffff;">
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-bottom:24px;">
+                      ${detailRows.join('')}
+                    </table>
+
+                    ${participantsHtml}
+                    ${actionItemsHtml}
+
+                    <p style="margin:24px 0 0;font-size:14px;color:#374151;line-height:1.6;">
+                      Thank you for your time. Please feel free to reach out for any clarifications.
+                    </p>
+
+                    <hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0;" />
+
+                    <p style="margin:0;font-size:14px;color:#111827;">Best Regards,</p>
+                    <p style="margin:4px 0 0;font-size:15px;font-weight:700;color:#ea580c;">${escapeHtml(input.samName)}</p>
+                    <p style="margin:2px 0 0;font-size:13px;color:#6b7280;">${
+                      designation
+                        ? `${escapeHtml(designation)} - Gazon Communications`
+                        : 'Gazon Communications India Ltd.'
+                    }</p>
+                    ${
+                      phone
+                        ? `<p style="margin:4px 0 0;font-size:13px;color:#6b7280;">Phone: ${escapeHtml(phone)}</p>`
+                        : ''
+                    }
+                  </td>
+                </tr>
+
+                <tr>
+                  <td style="padding:14px 24px;background:#f9fafb;font-size:11px;color:#9ca3af;border-top:1px solid #e5e7eb;">
+                    Sent automatically by SAM · Gazon Communications India Ltd.
+                  </td>
+                </tr>
+
+              </table>
+            </td>
+          </tr>
+
         </table>
-
-        ${bodyHtml ? `<div style="margin:0 0 24px;font-size:14px;color:#374151;line-height:1.6;">${bodyHtml}</div>` : ''}
-
-        ${participantsHtml}
-        ${actionItemsHtml}
-
-        <p style="margin:24px 0 0;font-size:14px;color:#374151;line-height:1.6;">
-          Thank you for your time. Please feel free to reach out for any clarifications.
-        </p>
-
-        <hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0;" />
-
-        <p style="margin:0;font-size:14px;color:#111827;">Best Regards,</p>
-        <p style="margin:4px 0 0;font-size:15px;font-weight:700;color:#ea580c;">${escapeHtml(input.samName)}</p>
-        <p style="margin:2px 0 0;font-size:13px;color:#6b7280;">${
-          designation
-            ? `${escapeHtml(designation)} - Gazon Communications`
-            : 'Gazon Communications India Ltd.'
-        }</p>
-        ${
-          phone
-            ? `<p style="margin:4px 0 0;font-size:13px;color:#6b7280;">Phone: ${escapeHtml(phone)}</p>`
-            : ''
-        }
-      </td>
-    </tr>`;
-
-  const html = wrapEmailShell({
-    preheader: `Minutes of meeting on ${formatDate(heldOrScheduled)} — ${customerName}`,
-    bodyHtml: bodyFragment,
-  });
+      </td></tr>
+    </table>
+  </body>
+</html>`.trim();
 
   return { subject, html, text: plainTextVersion(input) };
 }

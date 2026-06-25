@@ -128,8 +128,19 @@ function isEmptySentinel(v: unknown): boolean {
 function parseNumber(v: unknown): number | null {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
   if (typeof v !== 'string') return null;
-  // Tolerate ₹ symbols, commas, trailing /year etc.
-  const cleaned = v.replace(/[₹$, ]/g, '').replace(/\/.*$/, '').trim();
+  // Tolerate the noise CRM/ERP exports routinely put into numeric cells:
+  //   "₹2,30,000"           — currency symbols, commas
+  //   "230000 /year"        — period suffixes
+  //   "100 Mbps" / "100Mbps" — bandwidth unit on the New-Bandwidth column
+  //   "230000 p.a."         — "per annum" on ARC cells
+  // We deliberately don't accept "Gbps" / "Kbps" — the column is documented
+  // as Mbps, so stripping a different unit would silently corrupt the value.
+  const cleaned = v
+    .replace(/[₹$, ]/g, '')
+    .replace(/\/.*$/, '')
+    .replace(/\s*mbps\s*$/i, '')
+    .replace(/\s*(p\.?a\.?|per\s*annum)\s*$/i, '')
+    .trim();
   if (cleaned === '') return null;
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : null;

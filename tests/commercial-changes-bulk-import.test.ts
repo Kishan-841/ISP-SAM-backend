@@ -192,6 +192,32 @@ describe('POST /commercial-changes/bulk-import', () => {
     expect(Number(badUp!.currentArc)).toBe(500000);
   });
 
+  it('strips Mbps suffix on New Bandwidth — CRM exports routinely include "100 Mbps"', async () => {
+    // The user's CRM export ships New Bandwidth cells as "150Mbps", "200 Mbps",
+    // "150  mbps" — none of which are valid Number() inputs. The importer
+    // tolerates them by stripping the trailing unit before parsing.
+    const { cookie } = await adminCookie();
+    await seedAccount({ clientName: 'A', circuitId: 'CKT-300', currentArc: 500000, bandwidthMbps: 200 });
+    await seedAccount({ clientName: 'B', circuitId: 'CKT-301', currentArc: 200000, bandwidthMbps: 100 });
+    await seedAccount({ clientName: 'C', circuitId: 'CKT-302', currentArc: 400000, bandwidthMbps: 100 });
+
+    const res = await request(app)
+      .post('/commercial-changes/bulk-import')
+      .set('Cookie', cookie)
+      .attach('file', fixture('bulk-changes-with-mbps-suffix.csv'), 'changes.csv');
+
+    expect(res.status).toBe(200);
+    expect(res.body.imported).toBe(3);
+    expect(res.body.skipped).toBe(0);
+
+    // Account bandwidths get the numeric value, suffix stripped.
+    const after = await prisma.account.findMany({
+      where: { circuitId: { in: ['CKT-300', 'CKT-301', 'CKT-302'] } },
+      orderBy: { circuitId: 'asc' },
+    });
+    expect(after.map((a) => a.bandwidthMbps)).toEqual([500, 200, 150]);
+  });
+
   it('rejects rows whose account is already TERMINATED', async () => {
     const { cookie } = await adminCookie();
     await seedAccount({

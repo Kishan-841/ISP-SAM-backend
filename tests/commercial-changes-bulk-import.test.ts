@@ -218,6 +218,31 @@ describe('POST /commercial-changes/bulk-import', () => {
     expect(after.map((a) => a.bandwidthMbps)).toEqual([500, 200, 150]);
   });
 
+  it('DISCONNECTION rows commit when disconnection reason is empty', async () => {
+    // The per-row form requires a reason interactively, but bulk imports
+    // come from historical exports where the reason column is often blank.
+    // We accept missing reason on bulk to avoid rejecting otherwise-valid
+    // historical termination rows.
+    const { cookie } = await adminCookie();
+    await seedAccount({ clientName: 'No Reason Disc', circuitId: 'CKT-400', currentArc: 400000, bandwidthMbps: 50 });
+
+    const res = await request(app)
+      .post('/commercial-changes/bulk-import')
+      .set('Cookie', cookie)
+      .attach('file', fixture('bulk-changes-disco-no-reason.csv'), 'changes.csv');
+
+    expect(res.status).toBe(200);
+    expect(res.body.imported).toBe(1);
+    expect(res.body.skipped).toBe(0);
+
+    const after = await prisma.account.findFirst({ where: { circuitId: 'CKT-400' } });
+    expect(after!.contractStatus).toBe('TERMINATED');
+    expect(Number(after!.currentArc)).toBe(0);
+    const change = await prisma.commercialChange.findFirst({ where: { accountId: after!.id } });
+    expect(change!.changeType).toBe('DISCONNECTION');
+    expect(change!.disconnectionReason).toBeNull();
+  });
+
   it('rejects rows whose account is already TERMINATED', async () => {
     const { cookie } = await adminCookie();
     await seedAccount({

@@ -297,13 +297,15 @@ function validateRow(
   }
 
   if (changeType === 'DISCONNECTION') {
-    if (!c.disconnectionReason) {
-      return {
-        error: 'DISCONNECTION requires disconnectionReason',
-        kind: 'missing_field',
-      };
-    }
-    if (!VALID_DISCONNECTION_CODES.has(c.disconnectionReason.trim())) {
+    // disconnectionReason is OPTIONAL on the bulk path — the per-row form
+    // still requires it because the SAM is making the decision interactively,
+    // but bulk imports typically come from historical exports where the
+    // reason field may be blank. When present, the value must still match
+    // a canonical code; when absent, the row commits with reason = null.
+    if (
+      c.disconnectionReason &&
+      !VALID_DISCONNECTION_CODES.has(c.disconnectionReason.trim())
+    ) {
       return {
         error: `Invalid disconnection reason "${c.disconnectionReason}" — must match a code from /commercial-changes/disconnection-reasons`,
         kind: 'invalid_disconnection_reason',

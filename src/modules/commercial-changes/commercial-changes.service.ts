@@ -784,13 +784,14 @@ export const commercialChangesService = {
    * Returned shape includes the account + the requesting SAM so the
    * /quick-approvals page can render full context without round-trips.
    */
-  async listPendingSamQuickApprovals() {
+  async listPendingSamQuickApprovals(requester: Requester) {
+    const accountScope = await quickApprovalAccountScope(requester);
     const rows = await prisma.commercialChange.findMany({
       where: {
         changeType: 'DISCONNECTION',
         disconnectionMode: 'QUICK',
         quickApprovalDecision: null,
-        account: { kittyType: 'BASE' },
+        account: { kittyType: 'BASE', ...accountScope },
       },
       orderBy: [{ createdAt: 'asc' }],
       include: {
@@ -851,6 +852,7 @@ export const commercialChangesService = {
     decision: 'APPROVE' | 'REJECT';
     note: string | null;
     performedByUserId: string;
+    requesterRole: UserRole;
     ipAddress: string | null;
     userAgent: string | null;
   }) {
@@ -861,6 +863,20 @@ export const commercialChangesService = {
     if (!change) throw new Error('Commercial change not found');
     if (change.changeType !== 'DISCONNECTION' || change.disconnectionMode !== 'QUICK') {
       throw new Error('Not a quick-disconnect row');
+    }
+    // Team-scope guard: a SAM_HEAD may only decide on requests for customers
+    // they own or that belong to a SAM reporting to them. ADMIN is unscoped.
+    const scope = await quickApprovalAccountScope({
+      id: opts.performedByUserId,
+      role: opts.requesterRole,
+    });
+    if (scope) {
+      const allowedOwnerIds = (scope.samOwnerId as { in: string[] }).in;
+      if (!change.account.samOwnerId || !allowedOwnerIds.includes(change.account.samOwnerId)) {
+        throw new Error(
+          'OUT_OF_SCOPE: This quick-disconnect belongs to a customer outside your team.',
+        );
+      }
     }
     if (change.quickApprovalDecision) {
       throw new Error(
@@ -1318,6 +1334,30 @@ async function notifyCrmQuickDisconnectRequested(opts: {
           },
     },
   });
+}
+
+/**
+ * Account-scope filter for the SAM-internal quick-disconnect queue.
+ *
+ *  - ADMIN     → no filter (sees every pending request org-wide).
+ *  - SAM_HEAD  → only requests on customers they own or that belong to a
+ *                SAM reporting to them ("their team only"). Matches the
+ *                SAM_HEAD scoping used in accountsService.list.
+ *  - SAM       → never reaches here (route is ADMIN/SAM_HEAD-gated).
+ *
+ * Returns `undefined` when no scoping is needed (ADMIN), otherwise a Prisma
+ * `samOwnerId` filter ready to spread into the account `where`.
+ */
+async function quickApprovalAccountScope(
+  requester: Requester,
+): Promise<Prisma.AccountWhereInput | undefined> {
+  if (requester.role !== 'SAM_HEAD') return undefined;
+  const reports = await prisma.user.findMany({
+    where: { samHeadId: requester.id },
+    select: { id: true },
+  });
+  const ownerIds = [requester.id, ...reports.map((r) => r.id)];
+  return { samOwnerId: { in: ownerIds } };
 }
 
 /**

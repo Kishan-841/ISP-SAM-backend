@@ -52,17 +52,18 @@ commercialChangesRouter.post(
   commercialChangesController.bulkImport,
 );
 
-// ADMIN-only queue + decision for BASE-kitty quick-disconnect approvals
-// that stay entirely in SAM (no CRM round-trip). NEW kitty still routes
-// to CRM admin, unchanged.
+// Queue + decision for BASE-kitty quick-disconnect approvals that stay
+// entirely in SAM (no CRM round-trip). NEW kitty still routes to CRM
+// admin, unchanged. ADMIN sees the whole queue; SAM_HEAD sees only their
+// own + their team's requests (scoped in the service layer).
 commercialChangesRouter.get(
   '/quick-approvals',
-  requireRole('ADMIN'),
+  requireRole('ADMIN', 'SAM_HEAD'),
   commercialChangesController.listQuickApprovals,
 );
 commercialChangesRouter.post(
   '/:id/sam-quick-decision',
-  requireRole('ADMIN'),
+  requireRole('ADMIN', 'SAM_HEAD'),
   commercialChangesController.samQuickDecision,
 );
 

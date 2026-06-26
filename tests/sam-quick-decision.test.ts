@@ -11,7 +11,9 @@ import { SESSION_COOKIE } from '../src/lib/jwt.js';
  *   GET  /commercial-changes/quick-approvals
  *   POST /commercial-changes/:id/sam-quick-decision
  *
- * Both are ADMIN-only. APPROVE flips the account to DISCONNECTING +
+ * Both are gated to ADMIN + SAM_HEAD. ADMIN sees/decides the whole queue;
+ * SAM_HEAD is scoped to their own + their team's customers (own + reports).
+ * APPROVE flips the account to DISCONNECTING +
  * stamps scheduledTerminationAt. REJECT flips back to ACTIVE — but only
  * if the account is still PENDING_QUICK_APPROVAL (drift guard).
  *
@@ -117,13 +119,52 @@ describe('GET /commercial-changes/quick-approvals', () => {
     expect(res.body.total).toBe(0);
   });
 
-  it('returns 403 to non-ADMIN users', async () => {
+  it('returns 403 to plain SAM users', async () => {
     const samUser = await seedUser({ email: 'sam-qa@x.com', role: 'SAM' });
     const token = await tokenFor(samUser.id, 'SAM');
     const res = await request(app)
       .get('/commercial-changes/quick-approvals')
       .set('Cookie', `${SESSION_COOKIE}=${token}`);
     expect(res.status).toBe(403);
+  });
+
+  it('SAM_HEAD sees only their own + team requests, not other teams', async () => {
+    const head = await seedUser({ email: 'head-qa@x.com', role: 'SAM_HEAD' });
+    const headToken = await tokenFor(head.id, 'SAM_HEAD');
+    // A SAM reporting to this head, plus an unrelated SAM on another team.
+    const mySam = await prisma.user.create({
+      data: {
+        email: 'my-sam@x.com',
+        name: 'My SAM',
+        role: 'SAM',
+        passwordHash: 'x',
+        samHeadId: head.id,
+      },
+    });
+    const otherSam = await seedUser({ email: 'other-sam@x.com', role: 'SAM' });
+
+    const mineAcct = await seedAccount({
+      clientName: 'Mine',
+      kittyType: 'BASE',
+      currentArc: 100000,
+      samOwnerId: mySam.id,
+    });
+    const theirsAcct = await seedAccount({
+      clientName: 'Theirs',
+      kittyType: 'BASE',
+      currentArc: 100000,
+      samOwnerId: otherSam.id,
+    });
+    await seedPendingQuickRequest({ account: mineAcct, performedByUserId: mySam.id });
+    await seedPendingQuickRequest({ account: theirsAcct, performedByUserId: otherSam.id });
+
+    const res = await request(app)
+      .get('/commercial-changes/quick-approvals')
+      .set('Cookie', `${SESSION_COOKIE}=${headToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.items[0]!.account.clientName).toBe('Mine');
   });
 });
 
@@ -274,7 +315,7 @@ describe('POST /commercial-changes/:id/sam-quick-decision', () => {
     expect(res.status).toBe(404);
   });
 
-  it('returns 403 to non-ADMIN users', async () => {
+  it('returns 403 to plain SAM users', async () => {
     const sam = await seedUser({ email: 'sam-no-decide@x.com', role: 'SAM' });
     const samToken = await tokenFor(sam.id, 'SAM');
     const acct = await seedAccount({ clientName: 'E', kittyType: 'BASE', currentArc: 100000 });
@@ -286,5 +327,61 @@ describe('POST /commercial-changes/:id/sam-quick-decision', () => {
       .send({ decision: 'APPROVE' });
 
     expect(res.status).toBe(403);
+  });
+
+  it('SAM_HEAD can APPROVE a request for a customer on their team', async () => {
+    const head = await seedUser({ email: 'head-app@x.com', role: 'SAM_HEAD' });
+    const headToken = await tokenFor(head.id, 'SAM_HEAD');
+    const mySam = await prisma.user.create({
+      data: {
+        email: 'team-sam@x.com',
+        name: 'Team SAM',
+        role: 'SAM',
+        passwordHash: 'x',
+        samHeadId: head.id,
+      },
+    });
+    const acct = await seedAccount({
+      clientName: 'TeamCo',
+      kittyType: 'BASE',
+      currentArc: 100000,
+      samOwnerId: mySam.id,
+    });
+    const change = await seedPendingQuickRequest({ account: acct, performedByUserId: mySam.id });
+
+    const res = await request(app)
+      .post(`/commercial-changes/${change.id}/sam-quick-decision`)
+      .set('Cookie', `${SESSION_COOKIE}=${headToken}`)
+      .send({ decision: 'APPROVE' });
+
+    expect(res.status).toBe(200);
+    const updatedAcct = await prisma.account.findUnique({ where: { id: acct.id } });
+    expect(updatedAcct!.contractStatus).toBe('DISCONNECTING');
+  });
+
+  it('SAM_HEAD gets 403 OUT_OF_SCOPE deciding on a customer outside their team', async () => {
+    const head = await seedUser({ email: 'head-oos@x.com', role: 'SAM_HEAD' });
+    const headToken = await tokenFor(head.id, 'SAM_HEAD');
+    // Customer owned by a SAM that does NOT report to this head.
+    const otherSam = await seedUser({ email: 'foreign-sam@x.com', role: 'SAM' });
+    const acct = await seedAccount({
+      clientName: 'ForeignCo',
+      kittyType: 'BASE',
+      currentArc: 100000,
+      samOwnerId: otherSam.id,
+    });
+    const change = await seedPendingQuickRequest({ account: acct, performedByUserId: otherSam.id });
+
+    const res = await request(app)
+      .post(`/commercial-changes/${change.id}/sam-quick-decision`)
+      .set('Cookie', `${SESSION_COOKIE}=${headToken}`)
+      .send({ decision: 'APPROVE' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/OUT_OF_SCOPE/);
+
+    // Nothing should have changed.
+    const stillPending = await prisma.commercialChange.findUnique({ where: { id: change.id } });
+    expect(stillPending!.quickApprovalDecision).toBeNull();
   });
 });

@@ -296,8 +296,15 @@ export const commercialChangesController = {
    * List pending QUICK-disconnect requests for BASE-kitty customers
    * awaiting a SAM-admin decision.
    */
-  async listQuickApprovals(_req: AuthedRequest, res: Response) {
-    const items = await commercialChangesService.listPendingSamQuickApprovals();
+  async listQuickApprovals(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const items = await commercialChangesService.listPendingSamQuickApprovals({
+      id: req.user.id,
+      role: req.user.role,
+    });
     res.json({ items, total: items.length });
   },
 
@@ -326,6 +333,7 @@ export const commercialChangesController = {
         decision: parse.data.decision,
         note: parse.data.note ?? null,
         performedByUserId: req.user.id,
+        requesterRole: req.user.role,
         ipAddress: ctx.ip,
         userAgent: ctx.userAgent,
       });
@@ -334,6 +342,10 @@ export const commercialChangesController = {
       const msg = err instanceof Error ? err.message : 'Decision failed';
       if (msg === 'Commercial change not found') {
         res.status(404).json({ error: msg });
+        return;
+      }
+      if (msg.startsWith('OUT_OF_SCOPE')) {
+        res.status(403).json({ error: msg });
         return;
       }
       if (msg.startsWith('ALREADY_DECIDED') || msg.startsWith('NEW_BASE_NOT_LOCAL')) {

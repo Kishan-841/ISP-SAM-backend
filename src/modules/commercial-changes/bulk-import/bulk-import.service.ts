@@ -145,7 +145,18 @@ export const bulkImportService = {
       }
     }
 
-    for (const row of rows) {
+    // Apply changes in EFFECTIVE-DATE order so multiple changes on the same
+    // account chain correctly — each change's oldArc must be the prior
+    // change's newArc, not the account's original ARC. Stable sort keeps the
+    // sheet's order for rows sharing a date; rows missing a date sort last
+    // (they'll fail validation anyway). rowNumber is preserved for reporting.
+    const orderedRows = [...rows].sort(
+      (a, b) =>
+        (a.canonical.effectiveDate?.getTime() ?? Infinity) -
+        (b.canonical.effectiveDate?.getTime() ?? Infinity),
+    );
+
+    for (const row of orderedRows) {
       const validation = validateRow(row, accountsByCircuit);
       if ('error' in validation) {
         summary.errors.push({
@@ -174,6 +185,20 @@ export const bulkImportService = {
           effectiveDate: applied.effectiveDate.toISOString().slice(0, 10),
         });
         summary.imported++;
+
+        // Chain the in-memory snapshot so a later change on the SAME account
+        // starts from this change's result. `validation.account` is the shared
+        // accountsByCircuit entry, so mutating it here updates what the next
+        // row for this circuit sees as its "old" ARC / bandwidth / status.
+        if (validation.changeType === 'DISCONNECTION') {
+          validation.account.currentArc = new Prisma.Decimal(0);
+          validation.account.contractStatus = 'TERMINATED';
+        } else {
+          validation.account.currentArc = new Prisma.Decimal(validation.newArc);
+          if (validation.newBandwidthMbps != null) {
+            validation.account.bandwidthMbps = validation.newBandwidthMbps;
+          }
+        }
       } catch (err) {
         summary.errors.push({
           rowNumber: row.rowNumber,

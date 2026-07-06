@@ -36,6 +36,12 @@ export type CanonicalRow = {
   accountManager?: string;
   userName?: string;
   ipDetails?: string;
+  /** Explicit OLD/NEW (→ BASE/NEW) label from the source sheet. When present
+   *  it OVERRIDES the onboarding-date-derived kitty, so operators can pin the
+   *  two-kitty split to their own OLD/NEW column instead of the Apr-1 rule.
+   *  Parsed to BASE/NEW in parse-workbook; unrecognised labels are dropped
+   *  and the date rule applies. */
+  kittyType?: 'BASE' | 'NEW';
 };
 
 /**
@@ -210,6 +216,17 @@ export const HEADER_SYNONYMS: Record<string, ParsedRowKey> = {
   loginname: 'userName',
   internalcode: 'userName',
   internalslug: 'userName',
+
+  // kittyType — explicit OLD/NEW (→ BASE/NEW) override. See parse-workbook
+  // (value normalisation) + import.service validate() (fallback to date rule).
+  type: 'kittyType',
+  kitty: 'kittyType',
+  kittytype: 'kittyType',
+  customertype: 'kittyType',
+  accounttype: 'kittyType',
+  basenew: 'kittyType',
+  oldnew: 'kittyType',
+  baseornew: 'kittyType',
 
   // ipDetails (comma-separated free text)
   ipdetails: 'ipDetails',

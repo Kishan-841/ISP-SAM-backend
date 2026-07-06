@@ -201,6 +201,7 @@ export const dashboardService = {
         : await prisma.commercialChange.findMany({
             where: changeWhere,
             select: {
+              accountId: true,
               changeType: true,
               oldArc: true,
               newArc: true,
@@ -216,6 +217,10 @@ export const dashboardService = {
     let rateRevsArcChange = 0;
     let terminationsCount = 0;
     let terminationsArcLost = 0;
+    // Accounts whose termination is explained by an applied DISCONNECTION
+    // transaction — tracked so we don't double-count them when we sweep up
+    // imported-as-terminated accounts below.
+    const disconnectedViaTxn = new Set<string>();
 
     for (const c of changes) {
       const oldA = Number(c.oldArc);
@@ -241,8 +246,26 @@ export const dashboardService = {
           if (c.accountAppliedAt) {
             terminationsCount++;
             terminationsArcLost += oldA;
+            disconnectedViaTxn.add(c.accountId);
           }
           break;
+      }
+    }
+
+    // Terminations WITHOUT a transaction behind them — e.g. customers
+    // Excel-imported with Status=Disconnected. Their start-of-period ARC left
+    // the base but has no DISCONNECTION row to land it in the Disconnections
+    // bucket. Attribute them so the waterfall reconciles; otherwise the loss
+    // leaks into the "Pending CRM settlement" catch-all row (which has nothing
+    // to do with CRM for a local-only, Excel-imported base). Kept separate
+    // from the transaction totals so it only applies to the All-Time view —
+    // these rows carry no effective date to bucket into a specific quarter.
+    let importTerminatedCount = 0;
+    let importTerminatedArc = 0;
+    for (const a of baseAccounts) {
+      if (a.contractStatus === 'TERMINATED' && !disconnectedViaTxn.has(a.id)) {
+        importTerminatedCount++;
+        importTerminatedArc += Number(a.startOfPeriodArc ?? a.currentArc);
       }
     }
 
@@ -291,6 +314,11 @@ export const dashboardService = {
       currentArc = liveActive.reduce((sum, a) => sum + Number(a.currentArc), 0);
       currentCustomers = liveActive.length;
       terminatedCount = liveTerminated;
+      // Fold imported-as-terminated accounts into the Disconnections bucket so
+      // the waterfall (Start − Disconnections = Current) reconciles instead of
+      // pushing the gap into the pending row.
+      terminationsCount += importTerminatedCount;
+      terminationsArcLost += importTerminatedArc;
     }
 
     // Pending CRM settlement — counts every committed change that's still
@@ -344,17 +372,18 @@ export const dashboardService = {
 };
 
 /**
- * Rounds a lakh-denominated number to 2 decimal places (~₹1K granularity).
+ * Normalises a lakh-denominated number to exact ₹1 (rupee) precision.
  *
- * Previously this rounded to 1 decimal, which silently truncated sub-lakh
- * deltas to zero — e.g. a ₹4,000 upgrade (96,000 → 100,000 ARC) rounded to
- * 0.0L and the bucket card on the dashboard rendered as "₹0" despite the
- * commercial change being counted. 2 decimals (₹0.01L = ₹1K) keeps small
- * but meaningful deltas visible while still display-friendly downstream
- * (`.toFixed(1)` callers re-round at render time).
+ * We keep values in lakh units over the wire (the API fields are `…Lakh`),
+ * but must NOT lose rupees: the full-value dashboard cards multiply back by
+ * 1e5 and show the exact figure (e.g. ₹15,71,95,347), so rounding to ₹1K
+ * here would silently drop the last three digits. 5 decimals of a lakh =
+ * ₹1, which also cleans up floating-point artefacts from summing Decimals.
+ * The compact "₹X.XCr / ₹X.XL" summaries re-round at render time, so this
+ * finer precision doesn't affect them.
  */
 function roundLakh(n: number): number {
-  return Math.round(n * 100) / 100;
+  return Math.round(n * 100_000) / 100_000;
 }
 
 // ============================================================================
@@ -544,6 +573,7 @@ export async function computeNewBase(
   let rateRevsArcChange = 0;
   let terminationsCount = 0;
   let terminationsArcLost = 0;
+  const disconnectedViaTxn = new Set<string>();
 
   for (const c of changes) {
     const oldA = Number(c.oldArc);
@@ -570,6 +600,7 @@ export async function computeNewBase(
         if (c.accountAppliedAt) {
           terminationsCount++;
           terminationsArcLost += oldA;
+          disconnectedViaTxn.add(c.accountId);
         }
         break;
     }
@@ -601,6 +632,17 @@ export async function computeNewBase(
     currentArcLakh: roundLakh(Number(a.currentArc) / LAKH),
     contractStatus: a.contractStatus,
   }));
+
+  // Fold imported-as-terminated NEW accounts (e.g. Excel Status=Disconnected,
+  // no DISCONNECTION transaction) into the Disconnections bucket so the
+  // waterfall reconciles instead of leaking into the pending row. Mirrors the
+  // existing-base fix.
+  for (const a of newAccounts) {
+    if (a.contractStatus === 'TERMINATED' && !disconnectedViaTxn.has(a.id)) {
+      terminationsCount++;
+      terminationsArcLost += Number(a.startOfPeriodArc ?? a.currentArc);
+    }
+  }
 
   // Pending CRM settlement (same math as existingBase — see that comment).
   // Adjustment to reconcile the waterfall end with the live currentArc.

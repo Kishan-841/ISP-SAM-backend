@@ -77,6 +77,11 @@ export function parseWorkbook(buffer: Buffer): ParseResult {
           continue;
         }
         canonical[key] = d;
+      } else if (key === 'kittyType') {
+        // Explicit OLD/NEW override. Unrecognised labels are silently
+        // dropped so validate() falls back to the onboarding-date rule.
+        const kt = normalizeKittyLabel(value);
+        if (kt) canonical.kittyType = kt;
       } else {
         (canonical as Record<string, unknown>)[key] = String(value).trim();
       }
@@ -95,6 +100,18 @@ function isEmptySentinel(v: unknown): boolean {
   if (v === null || v === undefined) return true;
   const s = String(v).trim().toLowerCase();
   return EMPTY_SENTINELS.has(s);
+}
+
+/**
+ * Map a free-text OLD/NEW label to the canonical kitty. OLD / EXISTING /
+ * BASE (and "existing base") → BASE; NEW / "new base" → NEW. Anything else
+ * → null so the caller falls back to the onboarding-date rule.
+ */
+function normalizeKittyLabel(v: unknown): 'BASE' | 'NEW' | null {
+  const s = String(v).trim().toLowerCase().replace(/[^a-z]/g, '');
+  if (s === 'old' || s === 'existing' || s === 'base' || s === 'existingbase') return 'BASE';
+  if (s === 'new' || s === 'newbase') return 'NEW';
+  return null;
 }
 
 function parseNumber(v: unknown): number | null {

@@ -63,6 +63,12 @@ const STATUS_ALIASES: Record<string, ContractStatus> = {
   active: 'ACTIVE',
   live: 'ACTIVE',
   inservice: 'ACTIVE',
+  // CRM lead/order lifecycle: a "Completed" order means onboarding finished
+  // and the customer is live in service → ACTIVE.
+  completed: 'ACTIVE',
+  complete: 'ACTIVE',
+  activated: 'ACTIVE',
+  installed: 'ACTIVE',
   pending: 'PENDING',
   new: 'PENDING',
   inprogress: 'PENDING',
@@ -393,6 +399,13 @@ type ValidatedData = {
   metadata?: object;
 };
 
+/** UTC-midnight of the current day — default onboarding date for rows that
+ *  arrive without one (the column is NOT NULL and feeds kitty derivation). */
+function startOfTodayUTC(): Date {
+  const n = new Date();
+  return new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate()));
+}
+
 function validate(
   row: ParsedRow,
   samDirectory: SamDirectory,
@@ -400,9 +413,19 @@ function validate(
   | { error: string; kind: ImportErrorKind }
   | { data: ValidatedData; samOwnerName: string | null; warning: string | null } {
   const c = row.canonical;
-  if (!c.clientName) return { error: 'Missing customer/client name', kind: 'missing_field' };
-  if (!c.onboardingDate) return { error: 'Missing onboarding date', kind: 'missing_field' };
-  if (typeof c.currentArc !== 'number') return { error: 'Missing ARC', kind: 'missing_field' };
+  // Core fields are OPTIONAL — rather than reject a row that's missing a name,
+  // date, or ARC, we import it with a sensible default so no customer is
+  // silently dropped. These columns are NOT NULL in the DB, hence defaults
+  // (not nulls): name falls back to any other identifier, ARC to 0, onboarding
+  // date to today (kitty still respects an explicit OLD/NEW column when given).
+  const clientName =
+    c.clientName?.trim() ||
+    c.companyName?.trim() ||
+    c.customerCode?.trim() ||
+    c.userName?.trim() ||
+    'Unnamed Customer';
+  const currentArc = typeof c.currentArc === 'number' ? c.currentArc : 0;
+  const onboardingDate = c.onboardingDate ?? startOfTodayUTC();
 
   // contractStatus — accept aliases (e.g. "Closed" -> TERMINATED, "Live" -> ACTIVE).
   let status: ContractStatus = 'ACTIVE';
@@ -419,14 +442,16 @@ function validate(
 
   return {
     data: {
-      clientName: c.clientName,
-      kittyType: deriveKittyType(c.onboardingDate),
-      currentArc: c.currentArc,
+      clientName,
+      // Explicit OLD/NEW column wins; otherwise derive from onboarding date
+      // (BASE if active on/before Apr 1, else NEW).
+      kittyType: c.kittyType ?? deriveKittyType(onboardingDate),
+      currentArc,
       // Snapshot at create-time. The update path strips this so re-imports
       // don't overwrite the original baseline.
-      startOfPeriodArc: c.currentArc,
+      startOfPeriodArc: currentArc,
       contractStatus: status,
-      onboardingDate: c.onboardingDate,
+      onboardingDate,
       companyName: c.companyName ?? null,
       mobileNumber: c.mobileNumber ?? null,
       email: c.email?.trim() || null,

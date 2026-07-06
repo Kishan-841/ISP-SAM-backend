@@ -80,19 +80,73 @@ describe('POST /accounts/import', () => {
     expect(account.metadata).toMatchObject({ 'SLA Tier': 'Gold-24x7' });
   });
 
-  it('skips rows missing required fields and reports errors', async () => {
+  it('honors an explicit OLD/NEW Type column over the onboarding-date rule', async () => {
+    const cookie = await adminCookie();
+    const res = await request(app)
+      .post('/accounts/import')
+      .set('Cookie', cookie)
+      .attach('file', fixture('with-kitty-type.csv'), 'with-kitty-type.csv');
+    expect(res.status).toBe(200);
+    expect(res.body.imported).toBe(3);
+
+    const list = await request(app).get('/accounts').set('Cookie', cookie);
+    const byName = Object.fromEntries(
+      list.body.accounts.map((a: { clientName: string; kittyType: string }) => [a.clientName, a.kittyType]),
+    );
+    // Labelled OLD but onboarded 2026-06-15 (after Apr 1, would derive NEW)
+    // → BASE, because the explicit label wins over the date.
+    expect(byName['OldByLabel']).toBe('BASE');
+    // Labelled NEW but onboarded 2024-01-10 (before Apr 1, would derive BASE)
+    // → NEW, label wins over date. Together these prove the override both ways.
+    expect(byName['NewByLabel']).toBe('NEW');
+    // Unlabelled row still imports and gets a date-derived kitty (BASE or NEW
+    // depending on the fiscal cutoff — asserted in the date-rule tests above).
+    expect(byName['NoLabel']).toMatch(/^(BASE|NEW)$/);
+  });
+
+  it('accepts "Completed" status (CRM lifecycle) as ACTIVE', async () => {
+    const cookie = await adminCookie();
+    const res = await request(app)
+      .post('/accounts/import')
+      .set('Cookie', cookie)
+      .attach('file', fixture('status-completed.csv'), 'status-completed.csv');
+    expect(res.status).toBe(200);
+    expect(res.body.imported).toBe(2);
+    expect(res.body.errors).toEqual([]);
+
+    const list = await request(app).get('/accounts').set('Cookie', cookie);
+    const byName = Object.fromEntries(
+      list.body.accounts.map((a: { clientName: string; contractStatus: string }) => [
+        a.clientName,
+        a.contractStatus,
+      ]),
+    );
+    expect(byName['DoneCo']).toBe('ACTIVE');
+    expect(byName['GoneCo']).toBe('TERMINATED');
+  });
+
+  it('imports rows missing core fields, applying defaults instead of rejecting', async () => {
     const cookie = await adminCookie();
     const res = await request(app)
       .post('/accounts/import')
       .set('Cookie', cookie)
       .attach('file', fixture('missing-required.csv'), 'missing-required.csv');
     expect(res.status).toBe(200);
-    // ARC is required, so the missing-ARC row also fails.
+    // Name / ARC / date are now OPTIONAL — every row imports with a default.
     // Row 2: missing name, Row 3: missing ARC, Row 4: missing date.
-    expect(res.body.imported).toBe(0);
-    expect(res.body.skipped).toBe(3);
-    expect(res.body.errors).toHaveLength(3);
-    expect(res.body.errors[0].rowNumber).toBe(2);
+    expect(res.body.imported).toBe(3);
+    expect(res.body.skipped).toBe(0);
+    expect(res.body.errors).toEqual([]);
+
+    const byLead = Object.fromEntries(
+      res.body.createdAccounts.map((a: { leadId: string }) => [a.leadId, a]),
+    );
+    // Missing name → falls back to another identifier (none here → placeholder).
+    expect(byLead['LEAD-300'].clientName).toBe('Unnamed Customer');
+    // Missing ARC → 0.
+    expect(byLead['LEAD-301'].currentArc).toBe(0);
+    // Missing onboarding date → still imported (defaulted).
+    expect(byLead['LEAD-302']).toBeDefined();
   });
 
   it("aliases status 'Closed' to TERMINATED", async () => {
@@ -185,17 +239,17 @@ describe('POST /accounts/import', () => {
     expect(second.body.updatedAccounts.length).toBe(second.body.updated);
     expect(second.body.createdAccounts.length).toBe(second.body.imported);
 
-    // Now exercise the error-categorisation path with the missing-required fixture.
-    const bad = await request(app)
+    // Missing core fields no longer reject — they import with defaults, so the
+    // missing-required fixture produces zero missing_field errors.
+    const lenient = await request(app)
       .post('/accounts/import')
       .set('Cookie', cookie)
       .attach('file', fixture('missing-required.csv'), 'missing-required.csv');
-    expect(bad.body.errors.length).toBeGreaterThan(0);
-    for (const e of bad.body.errors) {
-      expect(['missing_field', 'invalid_value', 'duplicate', 'other']).toContain(e.kind);
-    }
-    // At least one row should be flagged as missing_field given the fixture's name.
-    expect(bad.body.errors.some((e: { kind: string }) => e.kind === 'missing_field')).toBe(true);
+    expect(lenient.status).toBe(200);
+    expect(lenient.body.imported).toBe(3);
+    expect(
+      lenient.body.errors.some((e: { kind: string }) => e.kind === 'missing_field'),
+    ).toBe(false);
   });
 
   it('imports the Email column onto accounts.email (trims whitespace, treats blank as null)', async () => {

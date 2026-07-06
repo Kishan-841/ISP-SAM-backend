@@ -353,6 +353,36 @@ describe('GET /dashboard/existing-base — pending CRM reconciliation', () => {
     expect(res.body.pending.netArcLakh).toBeCloseTo(1.2, 1);
   });
 
+  it('counts imported-as-terminated accounts (no transaction) as Disconnections, not pending', async () => {
+    const admin = await seedUser({ email: 'importterm@x.com', role: 'ADMIN' });
+    // Active base customer.
+    await seedAccount({
+      kittyType: 'BASE',
+      currentArc: 2000000,
+      startOfPeriodArc: 2000000,
+      contractStatus: 'ACTIVE',
+    });
+    // Excel-imported customer that arrived already TERMINATED (Status=Disconnected),
+    // with NO disconnection commercial-change behind it.
+    await seedAccount({
+      kittyType: 'BASE',
+      currentArc: 1000000,
+      startOfPeriodArc: 1000000,
+      contractStatus: 'TERMINATED',
+    });
+
+    const token = await tokenFor(admin.id, 'ADMIN');
+    const res = await authedGet(app, '/dashboard/existing-base', token);
+
+    // Start 30L, active 20L. The 10L loss shows under Disconnections…
+    expect(res.body.terminations.count).toBe(1);
+    expect(res.body.terminations.arcLostLakh).toBeCloseTo(10, 1);
+    // …and the waterfall reconciles, so nothing leaks into the pending row.
+    expect(res.body.pending.count).toBe(0);
+    expect(res.body.pending.netArcLakh).toBeCloseTo(0, 1);
+    expect(res.body.currentArcLakh).toBeCloseTo(20, 1);
+  });
+
   it('pending.netArc is ~0 when every committed change has been applied', async () => {
     const admin = await seedUser({ email: 'applied@x.com', role: 'ADMIN' });
     const acct = await seedAccount({

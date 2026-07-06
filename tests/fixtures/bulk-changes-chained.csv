@@ -1,0 +1,3 @@
+Circuit ID,Change Type,New ARC,New Bandwidth,Effective Date,Disconnection Reason,Reason
+CKT-CHAIN,UPGRADE,250000,150,2026-05-14,,Second upgrade
+CKT-CHAIN,UPGRADE,230000,100,2026-04-01,,First upgrade

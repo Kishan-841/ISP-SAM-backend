@@ -1,0 +1,4 @@
+Customer Name,Company,ARC,Status,Onboarding Date,Lead ID,Type
+OldByLabel,Old Co,100000,ACTIVE,2026-06-15,LEAD-200,OLD
+NewByLabel,New Co,100000,ACTIVE,2024-01-10,LEAD-201,NEW
+NoLabel,No Co,100000,ACTIVE,2026-05-01,LEAD-202,

@@ -119,6 +119,45 @@ describe('POST /commercial-changes/bulk-import', () => {
     expect(disc!.disconnectionReason).toBe('office-closed');
   });
 
+  it('chains multiple changes on the same account (2nd oldArc = 1st newArc), regardless of row order', async () => {
+    const { cookie } = await adminCookie();
+    // Francois-style case: one account, two upgrades in the same sheet.
+    // Fixture lists them OUT of order (14 May first, 1 Apr second) to also
+    // prove chronological processing.
+    const acct = await seedAccount({
+      clientName: 'Francois Compressors',
+      circuitId: 'CKT-CHAIN',
+      currentArc: 130000,
+      bandwidthMbps: 100,
+    });
+
+    const res = await request(app)
+      .post('/commercial-changes/bulk-import')
+      .set('Cookie', cookie)
+      .attach('file', fixture('bulk-changes-chained.csv'), 'chained.csv');
+
+    expect(res.status).toBe(200);
+    expect(res.body.imported).toBe(2);
+    expect(res.body.skipped).toBe(0);
+
+    const changes = await prisma.commercialChange.findMany({
+      where: { accountId: acct.id },
+      orderBy: { effectiveDate: 'asc' },
+    });
+    expect(changes).toHaveLength(2);
+    // 1 Apr: 1.3L → 2.3L
+    expect(Number(changes[0]!.oldArc)).toBe(130000);
+    expect(Number(changes[0]!.newArc)).toBe(230000);
+    // 14 May: chains from the first → 2.3L → 2.5L (NOT 1.3L → 2.5L)
+    expect(Number(changes[1]!.oldArc)).toBe(230000);
+    expect(Number(changes[1]!.newArc)).toBe(250000);
+
+    // Account ends at the latest state.
+    const after = await prisma.account.findUnique({ where: { id: acct.id } });
+    expect(Number(after!.currentArc)).toBe(250000);
+    expect(after!.bandwidthMbps).toBe(150);
+  });
+
   it('writes audit_logs rows tagged BULK_IMPORT_COMMERCIAL_CHANGE with source=BULK_EXCEL', async () => {
     const { cookie } = await adminCookie();
     await seedAccount({ clientName: 'Up Co',   circuitId: 'CKT-100', currentArc: 500000, bandwidthMbps: 200 });

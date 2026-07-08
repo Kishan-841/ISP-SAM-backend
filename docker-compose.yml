@@ -12,6 +12,13 @@
 #   • Volumes are project-prefixed by docker compose v2, so the
 #     'pgdata' volume here does not collide with the CRM's 'pgdata'.
 
+# Pin the compose project name. Without this, Compose derives the project from
+# the directory basename — so renaming the checkout (e.g. isp-sam-backend →
+# sam-backend) spawns a SECOND stack that collides with the live one on
+# 127.0.0.1:5500. Pinning it here means `docker compose up -d --build` always
+# targets the same project regardless of the folder name.
+name: isp-sam-backend
+
 services:
   db:
     image: postgres:16-alpine

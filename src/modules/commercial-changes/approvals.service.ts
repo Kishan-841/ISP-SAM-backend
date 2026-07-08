@@ -73,36 +73,47 @@ const QUEUE_INCLUDE = {
   },
 } satisfies Prisma.CommercialChangeInclude;
 
+/**
+ * The `where` clause for "changes awaiting the requester's approval stage".
+ * Shared by the approvals queue (listPending) and the sidebar badge count
+ * so the two can never disagree. Returns null for roles with no stage.
+ *
+ * Role-scoping:
+ *   ADMIN         → every pending stage (the whole pipeline)
+ *   ACCOUNTS      → PENDING_ACCOUNTS (org-wide)
+ *   SUPER_ADMIN_2 → PENDING_SUPER_ADMIN_2 (org-wide)
+ *   SAM_HEAD      → PENDING_SAM_HEAD, scoped to their team
+ *   others        → nothing
+ */
+export async function pendingApprovalsWhere(
+  requester: Requester,
+): Promise<Prisma.CommercialChangeWhereInput | null> {
+  switch (requester.role) {
+    case 'ADMIN':
+      return { approvalStatus: { in: [...PENDING_STAGES] } };
+    case 'ACCOUNTS':
+      return { approvalStatus: 'PENDING_ACCOUNTS' };
+    case 'SUPER_ADMIN_2':
+      return { approvalStatus: 'PENDING_SUPER_ADMIN_2' };
+    case 'SAM_HEAD': {
+      const scope = await quickApprovalAccountScope(requester);
+      return {
+        approvalStatus: 'PENDING_SAM_HEAD',
+        ...(scope ? { account: scope } : {}),
+      };
+    }
+    default:
+      return null;
+  }
+}
+
 export const approvalsService = {
   /**
    * Queue of changes awaiting the requester's stage.
-   *   ADMIN         → every pending stage (the whole pipeline)
-   *   ACCOUNTS      → PENDING_ACCOUNTS (org-wide)
-   *   SUPER_ADMIN_2 → PENDING_SUPER_ADMIN_2 (org-wide)
-   *   SAM_HEAD      → PENDING_SAM_HEAD, scoped to their team
-   *   others        → nothing
    */
   async listPending(requester: Requester) {
-    const where: Prisma.CommercialChangeWhereInput = {};
-    switch (requester.role) {
-      case 'ADMIN':
-        where.approvalStatus = { in: [...PENDING_STAGES] };
-        break;
-      case 'ACCOUNTS':
-        where.approvalStatus = 'PENDING_ACCOUNTS';
-        break;
-      case 'SUPER_ADMIN_2':
-        where.approvalStatus = 'PENDING_SUPER_ADMIN_2';
-        break;
-      case 'SAM_HEAD': {
-        where.approvalStatus = 'PENDING_SAM_HEAD';
-        const scope = await quickApprovalAccountScope(requester);
-        if (scope) where.account = scope;
-        break;
-      }
-      default:
-        return [];
-    }
+    const where = await pendingApprovalsWhere(requester);
+    if (!where) return [];
 
     const rows = await prisma.commercialChange.findMany({
       where,

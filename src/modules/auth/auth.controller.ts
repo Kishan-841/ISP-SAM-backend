@@ -10,6 +10,14 @@ const loginSchema = z.object({
   password: z.string().min(1),
 });
 
+const changePasswordSchema = z.object({
+  // Only used on the signed-out (login-page) path to identify the account.
+  // Ignored when a valid session is present.
+  email: z.string().email().transform((s) => s.toLowerCase()).optional(),
+  currentPassword: z.string().min(1, 'Current password is required'),
+  newPassword: z.string().min(6, 'New password must be at least 6 characters'),
+});
+
 const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 function publicUser(user: { id: string; email: string; name: string; role: string }) {
@@ -79,6 +87,96 @@ export const authController = {
       });
     }
     res.json({ ok: true });
+  },
+
+  async changePassword(req: Request, res: Response) {
+    const parse = changePasswordSchema.safeParse(req.body);
+    if (!parse.success) {
+      res.status(400).json({ error: parse.error.issues[0]?.message ?? 'Invalid body' });
+      return;
+    }
+
+    // Two ways to identify the account:
+    //   signed-in  (in-app /change-password) → the session's user id
+    //   signed-out (login-page modal)        → email + current password
+    // The endpoint uses optionalAuth, so a session takes precedence and the
+    // email in the body is ignored when present.
+    const reqUser = (req as Request & { user?: { id: string } }).user;
+    const signedOut = !reqUser;
+
+    let userId: string;
+    if (reqUser) {
+      userId = reqUser.id;
+    } else {
+      const email = parse.data.email;
+      if (!email) {
+        res.status(400).json({ error: 'Email is required.' });
+        return;
+      }
+      const user = await prisma.user.findUnique({ where: { email } });
+      if (!user) {
+        // Enumeration-resistant: same message as a wrong current password.
+        await writeAudit({
+          entityType: 'User',
+          entityId: SYSTEM_ENTITY_ID,
+          action: 'PASSWORD_CHANGE_FAILED',
+          performedBy: null,
+          payload: { emailAttempted: email, reason: 'no such user' },
+          req,
+        });
+        res.status(400).json({ error: 'Email or current password is incorrect.' });
+        return;
+      }
+      userId = user.id;
+    }
+
+    // Generic vs specific error text — don't confirm an email exists on the
+    // signed-out path by naming the "current password" specifically.
+    const wrongCurrentMsg = signedOut
+      ? 'Email or current password is incorrect.'
+      : 'Current password is incorrect.';
+
+    try {
+      const { email } = await authService.changePassword(
+        userId,
+        parse.data.currentPassword,
+        parse.data.newPassword,
+      );
+      await writeAudit({
+        entityType: 'User',
+        entityId: userId,
+        action: 'PASSWORD_CHANGED',
+        performedBy: userId,
+        payload: { email, via: signedOut ? 'signed-out' : 'session' },
+        req,
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '';
+      if (msg === 'INVALID_CURRENT_PASSWORD') {
+        await writeAudit({
+          entityType: 'User',
+          entityId: userId,
+          action: 'PASSWORD_CHANGE_FAILED',
+          performedBy: userId,
+          payload: { reason: 'invalid current password', via: signedOut ? 'signed-out' : 'session' },
+          req,
+        });
+        res.status(400).json({ error: wrongCurrentMsg });
+        return;
+      }
+      if (msg === 'SAME_PASSWORD') {
+        res
+          .status(400)
+          .json({ error: 'New password must be different from your current one.' });
+        return;
+      }
+      if (msg === 'USER_NOT_FOUND') {
+        res.status(401).json({ error: 'Unauthenticated' });
+        return;
+      }
+      throw err;
+    }
   },
 
   async me(req: Request, res: Response) {

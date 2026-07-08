@@ -31,8 +31,37 @@ const loginLimiter = rateLimit({
   message: { error: 'Too many login attempts. Try again in 15 minutes.' },
 });
 
+/**
+ * Guard on /auth/change-password. The route uses optionalAuth, so we key on
+ * the authenticated user id when signed-in (in-app change) or on `ip + email`
+ * when signed-out (login-page modal) — same shape as the login limiter. Either
+ * way it stops the current-password check from being brute-forced.
+ */
+const changePasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => {
+    const uid = (req as Request & { user?: { id: string } }).user?.id;
+    if (uid) return `pwchange:${uid}`;
+    const email =
+      typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    return `pwchange:${ipKeyGenerator(req.ip ?? '')}:${email}`;
+  },
+  message: { error: 'Too many password-change attempts. Try again in 15 minutes.' },
+});
+
 export const authRouter = Router();
 authRouter.post('/login', loginLimiter, authController.login);
+// optionalAuth (not requireAuth): the in-app page uses the session; the
+// login-page modal identifies the account by email + current password.
+authRouter.post(
+  '/change-password',
+  optionalAuth,
+  changePasswordLimiter,
+  authController.changePassword,
+);
 // Soft auth so we can audit *who* logged out — but never block a logout
 // (already-expired sessions should still clear the cookie cleanly).
 authRouter.post('/logout', optionalAuth, authController.logout);

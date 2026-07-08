@@ -7,14 +7,14 @@ import type { AuthedRequest } from '../auth/auth.middleware.js';
 const createSchema = z.object({
   email: z.string().email().transform((s) => s.toLowerCase()),
   name: z.string().min(1),
-  role: z.enum(['ADMIN', 'SAM_HEAD', 'SAM']),
+  role: z.enum(['ADMIN', 'SAM_HEAD', 'SAM', 'ACCOUNTS', 'SUPER_ADMIN_2']),
   password: z.string().min(6),
   samHeadId: z.string().uuid().optional(),
 });
 
 const updateSchema = z.object({
   name: z.string().min(1).optional(),
-  role: z.enum(['ADMIN', 'SAM_HEAD', 'SAM']).optional(),
+  role: z.enum(['ADMIN', 'SAM_HEAD', 'SAM', 'ACCOUNTS', 'SUPER_ADMIN_2']).optional(),
   /** null clears the reports-to; undefined leaves it alone. */
   samHeadId: z.string().uuid().nullable().optional(),
   /** When present, admin is resetting the user's password. */

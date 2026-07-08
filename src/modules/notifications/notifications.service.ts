@@ -16,6 +16,8 @@ import { prisma } from '../../prisma.js';
 
 export type NotificationKind =
   | 'COMMERCIAL_CHANGE_COMMITTED'
+  | 'COMMERCIAL_CHANGE_APPROVED'
+  | 'COMMERCIAL_CHANGE_REJECTED'
   | 'CUSTOMER_ASSIGNED'
   | 'CUSTOMER_UNASSIGNED'
   | 'CUSTOMER_ACTIVATED'
@@ -53,6 +55,8 @@ export type NotificationFeed = {
 
 const RELEVANT_ACTIONS = [
   'COMMIT',
+  'APPROVAL_APPROVED',
+  'APPROVAL_REJECTED',
   'ASSIGN',
   'UNASSIGN',
   'NOTIFY_CUSTOMER_ASSIGNED',
@@ -431,6 +435,33 @@ function formatRow(args: {
         severity: arcNew >= arcOld ? 'success' : 'warning',
         title: `${typeLabel} on ${customerName}`,
         description: `${actor} committed ${typeLabel.toLowerCase()} · ₹${arcOld.toLocaleString('en-IN')} → ₹${arcNew.toLocaleString('en-IN')}`,
+        href: `/transactions`,
+        meta: code ? { code } : undefined,
+      };
+    }
+
+    case 'APPROVAL_APPROVED': {
+      const typeLabel = cc ? labelChangeType(cc.changeType) : 'Commercial change';
+      return {
+        kind: 'COMMERCIAL_CHANGE_APPROVED',
+        severity: 'success',
+        title: `${typeLabel} approved · ${customerName}`,
+        description: `${actor} approved your ${typeLabel.toLowerCase()} — it's now applied.`,
+        href: `/transactions`,
+        meta: code ? { code } : undefined,
+      };
+    }
+
+    case 'APPROVAL_REJECTED': {
+      const typeLabel = cc ? labelChangeType(cc.changeType) : 'Commercial change';
+      const reason = pickPayloadString(row.payload, 'reason');
+      return {
+        kind: 'COMMERCIAL_CHANGE_REJECTED',
+        severity: 'critical',
+        title: `${typeLabel} rejected · ${customerName}`,
+        description: reason
+          ? `${actor} rejected your ${typeLabel.toLowerCase()}: ${reason}`
+          : `${actor} rejected your ${typeLabel.toLowerCase()}.`,
         href: `/transactions`,
         meta: code ? { code } : undefined,
       };

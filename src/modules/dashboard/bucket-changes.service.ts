@@ -60,6 +60,16 @@ export async function getBucketChanges(opts: {
   const where: Prisma.CommercialChangeWhereInput = {
     changeType: opts.bucket,
     account: accountWhere,
+    // Mirror existingBase: never surface changes still in the approval chain
+    // or rejected ones in the bucket drill-down.
+    approvalStatus: {
+      notIn: [
+        'PENDING_SUPER_ADMIN_2',
+        'PENDING_SAM_HEAD',
+        'PENDING_ACCOUNTS',
+        'REJECTED',
+      ],
+    },
   };
 
   // Quarter window only applies to BASE — matches dashboard.service.ts:existingBase.

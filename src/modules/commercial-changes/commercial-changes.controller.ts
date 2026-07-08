@@ -2,6 +2,7 @@ import type { Response } from 'express';
 import { z } from 'zod';
 import type { CommercialChangeType } from '@prisma/client';
 import { commercialChangesService } from './commercial-changes.service.js';
+import { approvalsService } from './approvals.service.js';
 import { bulkImportService } from './bulk-import/bulk-import.service.js';
 import { DISCONNECTION_REASONS } from './disconnection-reasons.js';
 import type { AuthedRequest } from '../auth/auth.middleware.js';
@@ -58,6 +59,13 @@ const backfillDisconnectionSchema = z.object({
 const samQuickDecisionSchema = z.object({
   decision: z.enum(['APPROVE', 'REJECT']),
   note: z.string().optional(),
+});
+
+const approvalDecisionSchema = z.object({
+  action: z.enum(['APPROVE', 'REJECT']),
+  // Mandatory on REJECT — the service enforces the length; optional here so
+  // an APPROVE with no reason still parses.
+  reason: z.string().optional(),
 });
 
 export const commercialChangesController = {
@@ -153,7 +161,7 @@ export const commercialChangesController = {
       // can match on if it ever needs to branch on type.
       if (
         err instanceof Error &&
-        /^(ACCOUNT_TERMINATED|ACCOUNT_DISCONNECTING|DISCONNECTION_IN_FLIGHT|ACCOUNT_PENDING_QUICK_APPROVAL|QUICK_DISCONNECT_DISABLED|QUICK_DISCONNECT_INVALID_DAYS|QUICK_DISCONNECT_REASON_REQUIRED):/.test(err.message)
+        /^(ACCOUNT_TERMINATED|ACCOUNT_DISCONNECTING|DISCONNECTION_IN_FLIGHT|ACCOUNT_PENDING_QUICK_APPROVAL|ACCOUNT_PENDING_APPROVAL|QUICK_DISCONNECT_DISABLED|QUICK_DISCONNECT_INVALID_DAYS|QUICK_DISCONNECT_REASON_REQUIRED):/.test(err.message)
       ) {
         res.status(422).json({ error: err.message });
         return;
@@ -369,6 +377,84 @@ export const commercialChangesController = {
         res.status(409).json({
           error:
             'ACCOUNT_DRIFTED: This account is no longer awaiting quick-disconnect approval (its status changed via another flow). Refresh the queue and try again.',
+        });
+        return;
+      }
+      throw err;
+    }
+  },
+
+  /**
+   * GET /commercial-changes/approvals
+   * Queue of BASE commercial changes awaiting the requester's approval stage.
+   * Role-gated to SUPER_ADMIN_2 / SAM_HEAD / ACCOUNTS / ADMIN at the route.
+   */
+  async listApprovals(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const items = await approvalsService.listPending({
+      id: req.user.id,
+      role: req.user.role,
+    });
+    res.json({ items, total: items.length });
+  },
+
+  /**
+   * POST /commercial-changes/:id/approval-decision
+   * Body: { action: 'APPROVE' | 'REJECT', reason?: string }
+   *
+   * Advance / finalize / reject a BASE commercial change at its current stage.
+   * The service enforces the per-stage role authorization and the mandatory
+   * rejection reason.
+   */
+  async approvalDecision(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const parse = approvalDecisionSchema.safeParse(req.body);
+    if (!parse.success) {
+      res.status(400).json({ error: parse.error.issues[0]?.message ?? 'Invalid body' });
+      return;
+    }
+    const ctx = getRequestContext(req);
+    try {
+      const change = await approvalsService.decide({
+        commercialChangeId: req.params.id as string,
+        action: parse.data.action,
+        reason: parse.data.reason ?? null,
+        performedByUserId: req.user.id,
+        requesterRole: req.user.role,
+        ipAddress: ctx.ip,
+        userAgent: ctx.userAgent,
+      });
+      res.json({ change });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Decision failed';
+      if (msg === 'Commercial change not found') {
+        res.status(404).json({ error: msg });
+        return;
+      }
+      if (msg.startsWith('WRONG_STAGE') || msg.startsWith('OUT_OF_SCOPE')) {
+        res.status(403).json({ error: msg });
+        return;
+      }
+      if (msg.startsWith('NOT_PENDING') || msg.startsWith('REJECTION_REASON_REQUIRED')) {
+        res.status(422).json({ error: msg });
+        return;
+      }
+      // Reject-path drift guard: account no longer PENDING_APPROVAL (P2025).
+      if (
+        err &&
+        typeof err === 'object' &&
+        'code' in err &&
+        (err as { code: string }).code === 'P2025'
+      ) {
+        res.status(409).json({
+          error:
+            'ACCOUNT_DRIFTED: This account is no longer awaiting approval (its status changed via another flow). Refresh the queue and try again.',
         });
         return;
       }

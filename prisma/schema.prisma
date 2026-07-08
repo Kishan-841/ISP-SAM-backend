@@ -29,6 +29,12 @@ enum ContractStatus {
   /// to DISCONNECTING with `scheduledTerminationAt = now + quickRequestedDays`
   /// (1..15). On REJECT it returns to ACTIVE.
   PENDING_QUICK_APPROVAL
+  /// A BASE (existing-base) commercial change is in the internal approval
+  /// chain (SUPER_ADMIN_2 → [SAM_HEAD] → ACCOUNTS). The change is NOT yet
+  /// reflected on the account or the dashboard. On terminal APPROVE the
+  /// account moves to its real next state (ACTIVE with new ARC / PROBABLE_CHURN
+  /// / DISCONNECTING); on REJECT it returns to ACTIVE.
+  PENDING_APPROVAL
 }
 
 enum RetentionDecision {
@@ -47,6 +53,30 @@ enum UserRole {
   ADMIN
   SAM_HEAD
   SAM
+  /// Central accounts team. Final commercial sign-off on BASE commercial
+  /// changes — they make the real change in the external billing/CRM system,
+  /// then approve here to apply it to the dashboard. Org-wide.
+  ACCOUNTS
+  /// Second-tier super admin. First-stage sign-off on BASE disconnections
+  /// (before ACCOUNTS). Org-wide.
+  SUPER_ADMIN_2
+}
+
+/// Internal approval-chain state for a BASE commercial change.
+/// NEW-base rows, admin backfill and bulk-import stay NOT_REQUIRED.
+enum ApprovalStatus {
+  /// Disconnection awaiting SUPER_ADMIN_2 (first stage).
+  PENDING_SUPER_ADMIN_2
+  /// Quick disconnection awaiting SAM_HEAD (middle stage, team-scoped).
+  PENDING_SAM_HEAD
+  /// Awaiting ACCOUNTS (final stage — applies the change on approve).
+  PENDING_ACCOUNTS
+  /// Fully approved and applied.
+  APPROVED
+  /// Rejected at some stage — terminal. rejectionReason is mandatory.
+  REJECTED
+  /// No approval needed (NEW base, backfill, bulk-import, legacy rows).
+  NOT_REQUIRED
 }
 
 enum MeetingType {
@@ -194,6 +224,18 @@ model CommercialChange {
   /// Date the account is to be fully terminated (PROCEED only).
   scheduledTerminationAt  DateTime?         @map("scheduled_termination_at") @db.Date
 
+  // ── Internal approval chain (BASE / existing-base only) ───────────────
+  // NEW-base rows, admin backfill and bulk-import stay NOT_REQUIRED and apply
+  // immediately. BASE rows walk SUPER_ADMIN_2 → [SAM_HEAD] → ACCOUNTS; the
+  // change is applied to the account only on the terminal APPROVED transition.
+  approvalStatus         ApprovalStatus       @default(NOT_REQUIRED) @map("approval_status")
+  /// Mandatory when approvalStatus=REJECTED — surfaced back to the raising SAM.
+  rejectionReason        String?              @map("rejection_reason")
+  /// User id of the approver who rejected. Free String vs FK to keep parity
+  /// with the other decidedBy columns; we don't cascade on user delete here.
+  rejectedBy             String?              @map("rejected_by") @db.Uuid
+  rejectedAt             DateTime?            @map("rejected_at") @db.Timestamptz(6)
+
   createdAt              DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
 
   account Account @relation(fields: [accountId], references: [id], onDelete: Restrict)
@@ -201,6 +243,7 @@ model CommercialChange {
   @@index([accountId])
   @@index([effectiveDate])
   @@index([crmStatus])
+  @@index([approvalStatus])
   @@map("commercial_changes")
 }
 

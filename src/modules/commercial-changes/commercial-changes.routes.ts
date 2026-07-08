@@ -67,6 +67,21 @@ commercialChangesRouter.post(
   commercialChangesController.samQuickDecision,
 );
 
+// Internal approval chain for BASE (existing-base) commercial changes. The
+// queue shows each approver only the stage they own; the service enforces the
+// per-stage role + team scope. Mounted BEFORE `/:id/...` so the static path
+// isn't captured as an id.
+commercialChangesRouter.get(
+  '/approvals',
+  requireRole('ADMIN', 'SUPER_ADMIN_2', 'SAM_HEAD', 'ACCOUNTS'),
+  commercialChangesController.listApprovals,
+);
+commercialChangesRouter.post(
+  '/:id/approval-decision',
+  requireRole('ADMIN', 'SUPER_ADMIN_2', 'SAM_HEAD', 'ACCOUNTS'),
+  commercialChangesController.approvalDecision,
+);
+
 commercialChangesRouter.post(
   '/',
   // Multer error → translate into 422 (matches the hard-gate semantics).

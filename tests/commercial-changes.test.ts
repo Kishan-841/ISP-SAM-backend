@@ -1,7 +1,16 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import request from 'supertest';
 import { app } from '../src/server.js';
-import { resetDb, seedAccount, seedUser } from './helpers/db.js';
+import { resetDb, seedAccount as seedAccountRaw, seedUser } from './helpers/db.js';
+
+// The CRM service-order bridge, immediate local-only apply, 21-day retention
+// and quick-disconnect-via-CRM flows exercised in this file are all NEW-base
+// behavior now — BASE (existing-base) changes route through the internal
+// approval chain (see commercial-changes-approvals.test.ts). Default every
+// account here to NEW so these tests keep testing the unchanged NEW path;
+// individual tests can still override kittyType.
+const seedAccount: typeof seedAccountRaw = (overrides = {}) =>
+  seedAccountRaw({ kittyType: 'NEW', ...overrides });
 import { tokenFor } from './helpers/auth.js';
 import { SESSION_COOKIE } from '../src/lib/jwt.js';
 import { prisma } from '../src/prisma.js';

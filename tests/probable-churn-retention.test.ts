@@ -11,10 +11,17 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import request from 'supertest';
 import { app } from '../src/server.js';
-import { resetDb, seedAccount, seedUser } from './helpers/db.js';
+import { resetDb, seedAccount as seedAccountRaw, seedUser } from './helpers/db.js';
 import { tokenFor } from './helpers/auth.js';
 import { SESSION_COOKIE } from '../src/lib/jwt.js';
 import { prisma } from '../src/prisma.js';
+
+// Committing a DISCONNECTION straight into the 21-day retention window (no
+// approval gate) is NEW-base behavior. BASE changes go through the approval
+// chain first (covered in commercial-changes-approvals.test.ts). Default the
+// accounts here to NEW so these retention tests stay focused on retention.
+const seedAccount: typeof seedAccountRaw = (overrides = {}) =>
+  seedAccountRaw({ kittyType: 'NEW', ...overrides });
 import {
   setApprovalFileUploaderForTests,
   type ApprovalFileUploader,
@@ -148,10 +155,14 @@ describe('POST /commercial-changes/:id/retention-decision', () => {
   it('PROCEED before retentionPromptDueAt is rejected — must wait for the 21-day window', async () => {
     const { cookie } = await adminCookie();
     const acct = await seedAccount({ currentArc: 900000, externalCrmId: null });
-    const commit = await raiseDisconnection(cookie, acct.id, '2026-05-01');
+    // Anchor the disconnection to *today* so the 21-day prompt is genuinely in
+    // the future regardless of when the suite runs (was hardcoded to a fixed
+    // date, which broke once the real clock passed it).
+    const today = new Date().toISOString().slice(0, 10);
+    const commit = await raiseDisconnection(cookie, acct.id, today);
     expect(commit.status).toBe(201);
 
-    // Prompt due 2026-05-22, today (in test seed) is well before that.
+    // Prompt due today+21; PROCEED now must be rejected.
     const res = await request(app)
       .post(`/commercial-changes/${commit.body.commercialChange.id}/retention-decision`)
       .set('Cookie', cookie)

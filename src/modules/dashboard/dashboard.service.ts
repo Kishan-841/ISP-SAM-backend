@@ -17,7 +17,15 @@ export type DashboardRequester = { id: string; role: UserRole };
 async function buildAccountScope(
   requester: DashboardRequester,
 ): Promise<Prisma.AccountWhereInput> {
-  if (requester.role === 'ADMIN') return {};
+  // ADMIN and the org-wide approver roles (ACCOUNTS, SUPER_ADMIN_2) see
+  // everything — they operate across all SAMs, not a single team.
+  if (
+    requester.role === 'ADMIN' ||
+    requester.role === 'ACCOUNTS' ||
+    requester.role === 'SUPER_ADMIN_2'
+  ) {
+    return {};
+  }
   if (requester.role === 'SAM') return { samOwnerId: requester.id };
   // SAM_HEAD
   const reports = await prisma.user.findMany({
@@ -133,6 +141,21 @@ export type ExistingBaseMetrics = {
   probableChurn: { count: number; arcAtRiskLakh: number };
 
   /**
+   * Existing-base commercial changes still walking the internal approval chain
+   * (SUPER_ADMIN_2 → SAM_HEAD → ACCOUNTS). Excluded from the buckets /
+   * Current ARC until approved. `netArcLakh` is the net ARC that will land
+   * once all pending changes are approved. Surfaced on the dashboard as a
+   * "pending approval" provision, a sibling to probable churn.
+   */
+  pendingApproval: {
+    count: number;
+    netArcLakh: number;
+    awaitingSuperAdmin2: number;
+    awaitingSamHead: number;
+    awaitingAccounts: number;
+  };
+
+  /**
    * Reconciliation block for the waterfall. The upgrades / downgrades buckets
    * count EVERY committed commercial change (whether or not CRM has applied
    * it to the account yet), while `currentArcLakh` only reflects changes
@@ -190,6 +213,18 @@ export const dashboardService = {
     const baseAccountIds = baseAccounts.map((a) => a.id);
     const changeWhere: Prisma.CommercialChangeWhereInput = {
       accountId: { in: baseAccountIds },
+      // Exclude BASE changes still walking the internal approval chain
+      // (PENDING_*) or that were rejected — neither is real yet, so they must
+      // not inflate the upgrade/downgrade/disconnection buckets. APPROVED and
+      // NOT_REQUIRED (NEW/backfill/bulk-import/legacy) both count.
+      approvalStatus: {
+        notIn: [
+          'PENDING_SUPER_ADMIN_2',
+          'PENDING_SAM_HEAD',
+          'PENDING_ACCOUNTS',
+          'REJECTED',
+        ],
+      },
     };
     if (opts.quarter) {
       const { start, end } = fyQuarterRange(opts.quarter);
@@ -337,6 +372,41 @@ export const dashboardService = {
       startArc + upgradesArcAdded - downgradesArcReduced - terminationsArcLost;
     const pendingNetArc = currentArc - waterfallEndArc;
 
+    // Changes still walking the internal approval chain (BASE only). These are
+    // deliberately excluded from the buckets / Current ARC above — the change
+    // is "made" but not applied until approved. Surface them as a provision
+    // (sibling to probable churn). Point-in-time: NOT narrowed by the quarter
+    // window, since a pending item is a live state regardless of effective date.
+    const pendingApprovalChanges =
+      baseAccountIds.length === 0
+        ? []
+        : await prisma.commercialChange.findMany({
+            where: {
+              accountId: { in: baseAccountIds },
+              approvalStatus: {
+                in: ['PENDING_SUPER_ADMIN_2', 'PENDING_SAM_HEAD', 'PENDING_ACCOUNTS'],
+              },
+            },
+            select: { changeType: true, oldArc: true, newArc: true, approvalStatus: true },
+          });
+
+    // Net ARC that WOULD land in Current ARC once every pending change is
+    // approved: upgrades add, downgrades subtract, disconnections remove the
+    // whole ARC, rate revisions are ARC-neutral.
+    let pendingApprovalNetArc = 0;
+    let awaitingSuperAdmin2 = 0;
+    let awaitingSamHead = 0;
+    let awaitingAccounts = 0;
+    for (const c of pendingApprovalChanges) {
+      const oldA = Number(c.oldArc);
+      const newA = Number(c.newArc);
+      if (c.changeType === 'DISCONNECTION') pendingApprovalNetArc -= oldA;
+      else if (c.changeType !== 'RATE_REVISION') pendingApprovalNetArc += newA - oldA;
+      if (c.approvalStatus === 'PENDING_SUPER_ADMIN_2') awaitingSuperAdmin2 += 1;
+      else if (c.approvalStatus === 'PENDING_SAM_HEAD') awaitingSamHead += 1;
+      else if (c.approvalStatus === 'PENDING_ACCOUNTS') awaitingAccounts += 1;
+    }
+
     return {
       totalCustomers,
       totalBaseArcLakh: roundLakh(startArc / LAKH),
@@ -362,6 +432,13 @@ export const dashboardService = {
       pending: {
         count: pendingCount,
         netArcLakh: roundLakh(pendingNetArc / LAKH),
+      },
+      pendingApproval: {
+        count: pendingApprovalChanges.length,
+        netArcLakh: roundLakh(pendingApprovalNetArc / LAKH),
+        awaitingSuperAdmin2,
+        awaitingSamHead,
+        awaitingAccounts,
       },
       probableChurn: {
         count: probableChurnAccounts.length,

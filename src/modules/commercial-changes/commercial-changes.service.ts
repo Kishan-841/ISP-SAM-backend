@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { CommercialChangeType, Prisma, UserRole } from '@prisma/client';
+import type { ApprovalStatus, CommercialChangeType, Prisma, UserRole } from '@prisma/client';
 import { prisma } from '../../prisma.js';
 import { buildAccountsTeamDraft, type EmailDraft } from './notification-bridge.js';
 import { lookupDisconnectionLabels } from './disconnection-reasons.js';
@@ -94,7 +94,11 @@ export type CommitResult = {
     | { ok: 'disabled' }
     | { ok: 'local-only' }
     | { ok: 'probable-churn' }
-    | { ok: 'pending-quick-approval' };
+    | { ok: 'pending-quick-approval' }
+    /** BASE (existing-base) change entered the internal approval chain.
+     *  No CRM order is raised; nothing is applied until the chain terminates
+     *  in APPROVED. See approvals.service.ts. */
+    | { ok: 'pending-approval'; stage: string };
 };
 
 export const PROBABLE_CHURN_WINDOW_DAYS = 21;
@@ -297,6 +301,11 @@ export const commercialChangesService = {
         'ACCOUNT_PENDING_QUICK_APPROVAL: A quick-disconnect request is awaiting CRM admin approval. Wait for the decision before raising another change.',
       );
     }
+    if (account.contractStatus === 'PENDING_APPROVAL') {
+      throw new Error(
+        'ACCOUNT_PENDING_APPROVAL: A commercial change for this customer is already awaiting internal approval. Wait for it to be approved or rejected before raising another.',
+      );
+    }
 
     // Quick-disconnect validation. Only applies when the caller explicitly
     // set mode=QUICK on a DISCONNECTION row; everything else routes through
@@ -304,7 +313,11 @@ export const commercialChangesService = {
     const isQuick =
       input.changeType === 'DISCONNECTION' && input.disconnectionMode === 'QUICK';
     if (isQuick) {
-      if (!isQuickDisconnectEnabled()) {
+      // The env gate only guards the CRM admin queue used by NEW-base quick
+      // disconnects. BASE quick disconnects are approved entirely in-app via
+      // the internal approval chain (SUPER_ADMIN_2 → SAM_HEAD → ACCOUNTS), so
+      // they don't depend on the CRM queue being live.
+      if (account.kittyType === 'NEW' && !isQuickDisconnectEnabled()) {
         throw new Error(
           'QUICK_DISCONNECT_DISABLED: Quick disconnect is not enabled on this environment. Set QUICK_DISCONNECT_ENABLED=true once the CRM admin queue is live.',
         );
@@ -460,27 +473,28 @@ export const commercialChangesService = {
       await autoRetainPendingDisconnection(input.accountId, input.performedByUserId);
     }
 
-    if (input.changeType === 'DISCONNECTION') {
+    if (account.kittyType === 'BASE') {
+      // ── Existing-base: internal approval chain ────────────────────────
+      // Every BASE commercial change now goes through the approval chain.
+      // NO CRM service-order is raised and nothing is applied to the account
+      // until the chain terminates in APPROVED (see approvals.service.ts).
+      //   UPGRADE / DOWNGRADE / RATE_REVISION → ACCOUNTS
+      //   DISCONNECTION (normal or quick)     → SUPER_ADMIN_2 (first stage)
+      const initialStage: ApprovalStatus =
+        input.changeType === 'DISCONNECTION' ? 'PENDING_SUPER_ADMIN_2' : 'PENDING_ACCOUNTS';
+      await enterApprovalChain(result.id, initialStage);
+      crm = { ok: 'pending-approval', stage: initialStage };
+    } else if (input.changeType === 'DISCONNECTION') {
+      // ── NEW-base disconnection (unchanged) ────────────────────────────
       if (isQuick) {
-        // QUICK path: skip the 21-day retention. Where the approval queue
-        // lives depends on the customer's kitty:
-        //   BASE → in-house SAM admin queue (/quick-approvals). No CRM call.
-        //   NEW  → CRM admin queue (existing behaviour).
-        // Both branches stamp the account PENDING_QUICK_APPROVAL.
+        // QUICK path: skip the 21-day retention, route to the CRM admin queue.
         await enterPendingQuickApproval(result.id);
-        if (account.kittyType === 'BASE') {
-          // No outbound CRM call — SAM admin will approve/reject in-app via
-          // POST /commercial-changes/:id/sam-quick-decision.
-          crm = { ok: 'pending-quick-approval' };
-        } else {
-          // NEW kitty: existing CRM admin approval flow.
-          await notifyCrmQuickDisconnectRequested({
-            commercialChange: result,
-            account,
-            performingUser,
-          });
-          crm = { ok: 'pending-quick-approval' };
-        }
+        await notifyCrmQuickDisconnectRequested({
+          commercialChange: result,
+          account,
+          performingUser,
+        });
+        crm = { ok: 'pending-quick-approval' };
       } else {
         await enterProbableChurn(result.id);
         crm = { ok: 'probable-churn' };
@@ -791,6 +805,10 @@ export const commercialChangesService = {
         changeType: 'DISCONNECTION',
         disconnectionMode: 'QUICK',
         quickApprovalDecision: null,
+        // Legacy queue only. BASE quick disconnects now walk the unified
+        // approval chain (approvalStatus != NOT_REQUIRED) and are actioned on
+        // the /approvals page, not here — exclude them so they don't double-list.
+        approvalStatus: 'NOT_REQUIRED',
         account: { kittyType: 'BASE', ...accountScope },
       },
       orderBy: [{ createdAt: 'asc' }],
@@ -1234,13 +1252,61 @@ async function autoRetainPendingDisconnection(
   ]);
 }
 
-async function enterProbableChurn(commercialChangeId: string): Promise<void> {
+/**
+ * Day 0 of a BASE commercial change — stamp the initial approval stage on the
+ * change row and park the account in PENDING_APPROVAL so no concurrent change
+ * can be raised and the dashboard knows this isn't live yet. Single
+ * transaction. The audit row seeds the journey timeline; the approver's queue
+ * reads `approvalStatus` directly (see approvals.service.ts).
+ */
+export async function enterApprovalChain(
+  commercialChangeId: string,
+  initialStage: ApprovalStatus,
+): Promise<void> {
   await prisma.$transaction(async (tx) => {
     const change = await tx.commercialChange.findUnique({
       where: { id: commercialChangeId },
     });
     if (!change) throw new Error('Commercial change not found');
-    const prompt = startOfDayUTC(change.effectiveDate);
+    await tx.commercialChange.update({
+      where: { id: commercialChangeId },
+      data: { approvalStatus: initialStage },
+    });
+    await tx.account.update({
+      where: { id: change.accountId },
+      data: { contractStatus: 'PENDING_APPROVAL' },
+    });
+    await tx.auditLog.create({
+      data: {
+        entityType: 'CommercialChange',
+        entityId: commercialChangeId,
+        action: 'APPROVAL_REQUESTED',
+        performedBy: change.createdBy,
+        payload: {
+          accountId: change.accountId,
+          changeType: change.changeType,
+          disconnectionMode: change.disconnectionMode,
+          stage: initialStage,
+        },
+      },
+    });
+  });
+}
+
+export async function enterProbableChurn(
+  commercialChangeId: string,
+  /** Anchor the 21-day retention window here. Defaults to the change's
+   *  effectiveDate (NEW-base disconnections commit straight into churn). The
+   *  BASE approval chain passes `new Date()` so the window starts when ACCOUNTS
+   *  gives the final approval, not when the SAM first raised the request. */
+  anchorDate?: Date,
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    const change = await tx.commercialChange.findUnique({
+      where: { id: commercialChangeId },
+    });
+    if (!change) throw new Error('Commercial change not found');
+    const prompt = startOfDayUTC(anchorDate ?? change.effectiveDate);
     prompt.setUTCDate(prompt.getUTCDate() + PROBABLE_CHURN_WINDOW_DAYS);
     await tx.commercialChange.update({
       where: { id: commercialChangeId },
@@ -1348,7 +1414,7 @@ async function notifyCrmQuickDisconnectRequested(opts: {
  * Returns `undefined` when no scoping is needed (ADMIN), otherwise a Prisma
  * `samOwnerId` filter ready to spread into the account `where`.
  */
-async function quickApprovalAccountScope(
+export async function quickApprovalAccountScope(
   requester: Requester,
 ): Promise<Prisma.AccountWhereInput | undefined> {
   if (requester.role !== 'SAM_HEAD') return undefined;
@@ -1395,13 +1461,13 @@ async function enterPendingQuickApproval(commercialChangeId: string): Promise<vo
   });
 }
 
-function startOfDayUTC(d: Date): Date {
+export function startOfDayUTC(d: Date): Date {
   const out = new Date(d);
   out.setUTCHours(0, 0, 0, 0);
   return out;
 }
 
-function addDays(d: Date, days: number): Date {
+export function addDays(d: Date, days: number): Date {
   const out = new Date(d);
   out.setUTCDate(out.getUTCDate() + days);
   return out;
@@ -1419,7 +1485,7 @@ function addDays(d: Date, days: number): Date {
  * so a crash mid-way can't leave the account updated without the marker
  * (which would let a future refresh re-apply and double-update the account).
  */
-async function applyChangeToAccount(commercialChangeId: string) {
+export async function applyChangeToAccount(commercialChangeId: string) {
   return prisma.$transaction(async (tx) => {
     const change = await tx.commercialChange.findUnique({
       where: { id: commercialChangeId },

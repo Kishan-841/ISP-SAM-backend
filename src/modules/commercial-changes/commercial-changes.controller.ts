@@ -385,8 +385,8 @@ export const commercialChangesController = {
   },
 
   /**
-   * GET /commercial-changes/approvals
-   * Queue of BASE commercial changes awaiting the requester's approval stage.
+   * GET /commercial-changes/approvals?status=pending|approved|rejected
+   * Pending = the requester's per-stage queue; approved/rejected = history.
    * Role-gated to SUPER_ADMIN_2 / SAM_HEAD / ACCOUNTS / ADMIN at the route.
    */
   async listApprovals(req: AuthedRequest, res: Response) {
@@ -394,11 +394,14 @@ export const commercialChangesController = {
       res.status(401).json({ error: 'Unauthenticated' });
       return;
     }
-    const items = await approvalsService.listPending({
-      id: req.user.id,
-      role: req.user.role,
-    });
-    res.json({ items, total: items.length });
+    const raw = req.query.status;
+    const status =
+      raw === 'approved' || raw === 'rejected' ? raw : 'pending';
+    const items = await approvalsService.listByStatus(
+      { id: req.user.id, role: req.user.role },
+      status,
+    );
+    res.json({ items, total: items.length, status });
   },
 
   /**

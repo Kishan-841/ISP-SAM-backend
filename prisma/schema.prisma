@@ -235,6 +235,11 @@ model CommercialChange {
   /// with the other decidedBy columns; we don't cascade on user delete here.
   rejectedBy             String?              @map("rejected_by") @db.Uuid
   rejectedAt             DateTime?            @map("rejected_at") @db.Timestamptz(6)
+  /// User id of the ACCOUNTS approver who gave the final APPROVED sign-off,
+  /// and when. Populated on the terminal approval so the Approved history tab
+  /// can show who/when without joining audit_logs.
+  approvedBy             String?              @map("approved_by") @db.Uuid
+  approvedAt             DateTime?            @map("approved_at") @db.Timestamptz(6)
 
   createdAt              DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
 

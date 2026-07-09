@@ -317,3 +317,57 @@ describe('NEW base never enters the approval chain', () => {
     expect(Number(after?.currentArc)).toBe(600000);
   });
 });
+
+describe('GET /commercial-changes/approvals — history tabs', () => {
+  it('approved tab shows the change with who approved + when, and drops it from pending', async () => {
+    const acct = await seedBaseAccount();
+    const commit = await commitUpgrade(cookies.SAM, acct.id, 800000);
+    const id = commit.body.commercialChange.id;
+    await decide(cookies.ACCOUNTS, id, 'APPROVE');
+
+    const res = await request(app)
+      .get('/commercial-changes/approvals?status=approved')
+      .set('Cookie', cookies.ACCOUNTS);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('approved');
+    const row = res.body.items.find((i: { id: string }) => i.id === id);
+    expect(row).toBeTruthy();
+    expect(row.approvalStatus).toBe('APPROVED');
+    expect(row.decidedByName).toBe('Accounts');
+    expect(row.approvedAt).toBeTruthy();
+
+    const pending = await request(app)
+      .get('/commercial-changes/approvals?status=pending')
+      .set('Cookie', cookies.ACCOUNTS);
+    expect(pending.body.items.find((i: { id: string }) => i.id === id)).toBeFalsy();
+  });
+
+  it('rejected tab shows the reason + who rejected + when', async () => {
+    const acct = await seedBaseAccount();
+    const commit = await commitUpgrade(cookies.SAM, acct.id, 800000);
+    const id = commit.body.commercialChange.id;
+    await decide(cookies.ACCOUNTS, id, 'REJECT', 'PO mismatch with the approved quote.');
+
+    const res = await request(app)
+      .get('/commercial-changes/approvals?status=rejected')
+      .set('Cookie', cookies.SUPER_ADMIN_2); // any approver sees the org-wide history
+    expect(res.status).toBe(200);
+    const row = res.body.items.find((i: { id: string }) => i.id === id);
+    expect(row.approvalStatus).toBe('REJECTED');
+    expect(row.rejectionReason).toBe('PO mismatch with the approved quote.');
+    expect(row.decidedByName).toBe('Accounts');
+    expect(row.rejectedAt).toBeTruthy();
+  });
+
+  it('SAM_HEAD history is scoped to their team', async () => {
+    const acct = await seedBaseAccount(); // owned by `sam`, who reports to `samHead`
+    const commit = await commitUpgrade(cookies.SAM, acct.id, 700000);
+    await decide(cookies.ACCOUNTS, commit.body.commercialChange.id, 'APPROVE');
+
+    const res = await request(app)
+      .get('/commercial-changes/approvals?status=approved')
+      .set('Cookie', cookies.SAM_HEAD);
+    expect(res.status).toBe(200);
+    expect(res.body.items).toHaveLength(1);
+  });
+});

@@ -107,6 +107,27 @@ export async function pendingApprovalsWhere(
   }
 }
 
+/**
+ * Account scope for the approved/rejected history tabs.
+ *   ADMIN / ACCOUNTS / SUPER_ADMIN_2 → org-wide (undefined = no filter)
+ *   SAM_HEAD                         → their team
+ *   anything else                    → null (no history view)
+ */
+async function historyAccountScope(
+  requester: Requester,
+): Promise<Prisma.AccountWhereInput | undefined | null> {
+  switch (requester.role) {
+    case 'ADMIN':
+    case 'ACCOUNTS':
+    case 'SUPER_ADMIN_2':
+      return undefined;
+    case 'SAM_HEAD':
+      return (await quickApprovalAccountScope(requester)) ?? {};
+    default:
+      return null;
+  }
+}
+
 export const approvalsService = {
   /**
    * Queue of changes awaiting the requester's stage.
@@ -131,6 +152,60 @@ export const approvalsService = {
     const where = await pendingApprovalsWhere(requester);
     if (!where) return 0;
     return prisma.commercialChange.count({ where });
+  },
+
+  /**
+   * Approvals list for a given tab:
+   *   pending  → the viewer's per-stage queue (same as listPending)
+   *   approved → BASE changes that were fully approved (newest decision first)
+   *   rejected → BASE changes that were rejected, with reason
+   *
+   * Approved/rejected are terminal (no stage), so scoping is org-wide for
+   * ADMIN / ACCOUNTS / SUPER_ADMIN_2 and team-only for SAM_HEAD. Each row is
+   * hydrated with the decider's name + timestamp.
+   */
+  async listByStatus(requester: Requester, status: 'pending' | 'approved' | 'rejected') {
+    if (status === 'pending') return this.listPending(requester);
+
+    const scope = await historyAccountScope(requester);
+    if (scope === null) return []; // role has no history view
+
+    const approvalStatus = status === 'approved' ? 'APPROVED' : 'REJECTED';
+    const rows = await prisma.commercialChange.findMany({
+      where: {
+        approvalStatus,
+        account: { kittyType: 'BASE', ...(scope ?? {}) },
+      },
+      orderBy:
+        status === 'approved'
+          ? [{ approvedAt: 'desc' }, { createdAt: 'desc' }]
+          : [{ rejectedAt: 'desc' }, { createdAt: 'desc' }],
+      include: QUEUE_INCLUDE,
+    });
+
+    // Resolve decider ids → names in one query.
+    const deciderIds = Array.from(
+      new Set(
+        rows
+          .map((r) => (status === 'approved' ? r.approvedBy : r.rejectedBy))
+          .filter((id): id is string => !!id),
+      ),
+    );
+    const users = deciderIds.length
+      ? await prisma.user.findMany({
+          where: { id: { in: deciderIds } },
+          select: { id: true, name: true },
+        })
+      : [];
+    const nameById = new Map(users.map((u) => [u.id, u.name]));
+
+    return rows.map((r) => {
+      const deciderId = status === 'approved' ? r.approvedBy : r.rejectedBy;
+      return {
+        ...serializeQueueRow(r),
+        decidedByName: deciderId ? nameById.get(deciderId) ?? null : null,
+      };
+    });
   },
 
   /**
@@ -297,7 +372,12 @@ async function applyTerminalApproval(opts: {
     await prisma.$transaction([
       prisma.commercialChange.update({
         where: { id: change.id },
-        data: { approvalStatus: 'APPROVED', accountAppliedAt: decidedAt },
+        data: {
+          approvalStatus: 'APPROVED',
+          approvedBy: performedByUserId,
+          approvedAt: decidedAt,
+          accountAppliedAt: decidedAt,
+        },
       }),
       prisma.account.update({
         where: { id: change.accountId },
@@ -332,6 +412,8 @@ async function applyTerminalApproval(opts: {
         where: { id: change.id },
         data: {
           approvalStatus: 'APPROVED',
+          approvedBy: performedByUserId,
+          approvedAt: decidedAt,
           scheduledTerminationAt,
           retentionDecision: 'PROCEED',
           retentionDecidedAt: decidedAt,
@@ -365,7 +447,12 @@ async function applyTerminalApproval(opts: {
   await prisma.$transaction([
     prisma.commercialChange.update({
       where: { id: change.id },
-      data: { approvalStatus: 'APPROVED', retentionPromptDueAt: prompt },
+      data: {
+        approvalStatus: 'APPROVED',
+        approvedBy: performedByUserId,
+        approvedAt: decidedAt,
+        retentionPromptDueAt: prompt,
+      },
     }),
     prisma.account.update({
       where: { id: change.accountId },
@@ -454,6 +541,13 @@ function serializeQueueRow(
     approvalFileUrl: c.approvalFileUrl,
     poFileUrl: c.poFileUrl,
     requestedAt: c.createdAt.toISOString(),
+    // Decision fields — populated for APPROVED / REJECTED history rows. The
+    // decider's *name* is attached by listByStatus (needs a user lookup);
+    // pending rows leave decidedByName null.
+    rejectionReason: c.rejectionReason,
+    approvedAt: c.approvedAt?.toISOString() ?? null,
+    rejectedAt: c.rejectedAt?.toISOString() ?? null,
+    decidedByName: null as string | null,
     account: {
       id: c.account.id,
       clientName: c.account.clientName,

@@ -155,6 +155,28 @@ export const approvalsService = {
   },
 
   /**
+   * Counts for all three tabs at once, so each tab can show its number
+   * without the user clicking through. Same scoping as listByStatus.
+   */
+  async getTabCounts(
+    requester: Requester,
+  ): Promise<{ pending: number; approved: number; rejected: number }> {
+    const scope = await historyAccountScope(requester);
+    const historyCount = (approvalStatus: 'APPROVED' | 'REJECTED') =>
+      scope === null
+        ? Promise.resolve(0)
+        : prisma.commercialChange.count({
+            where: { approvalStatus, account: { kittyType: 'BASE', ...(scope ?? {}) } },
+          });
+    const [pending, approved, rejected] = await Promise.all([
+      this.countPending(requester),
+      historyCount('APPROVED'),
+      historyCount('REJECTED'),
+    ]);
+    return { pending, approved, rejected };
+  },
+
+  /**
    * Approvals list for a given tab:
    *   pending  → the viewer's per-stage queue (same as listPending)
    *   approved → BASE changes that were fully approved (newest decision first)

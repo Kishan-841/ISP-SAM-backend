@@ -397,11 +397,12 @@ export const commercialChangesController = {
     const raw = req.query.status;
     const status =
       raw === 'approved' || raw === 'rejected' ? raw : 'pending';
-    const items = await approvalsService.listByStatus(
-      { id: req.user.id, role: req.user.role },
-      status,
-    );
-    res.json({ items, total: items.length, status });
+    const requester = { id: req.user.id, role: req.user.role };
+    const [items, counts] = await Promise.all([
+      approvalsService.listByStatus(requester, status),
+      approvalsService.getTabCounts(requester),
+    ]);
+    res.json({ items, total: items.length, status, counts });
   },
 
   /**

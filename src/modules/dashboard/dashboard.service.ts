@@ -356,21 +356,26 @@ export const dashboardService = {
       terminationsArcLost += importTerminatedArc;
     }
 
-    // Pending CRM settlement — counts every committed change that's still
-    // in CRM workflow (accountAppliedAt null). The netArc is the adjustment
-    // needed to make the waterfall sum match the live currentArc; it
-    // captures pending UP/DOWN/DISC plus the probable-churn exclusion in
-    // one number, so the UI can render a single "Pending" row.
+    // Pending CRM settlement — the residual adjustment that makes the waterfall
+    // bucket sum match the live currentArc, EXCLUDING the probable-churn
+    // exclusion (which is surfaced as its own row). Without this exclusion a
+    // local, no-CRM lead sitting in retention would be mislabeled as "pending
+    // in CRM". Probable-churn accounts are counted separately in `probableChurn`.
+    const probableChurnAccountIds = new Set(probableChurnAccounts.map((a) => a.id));
     const pendingCount = changes.filter(
       (c) =>
         !c.accountAppliedAt &&
+        !probableChurnAccountIds.has(c.accountId) &&
         (c.changeType === 'UPGRADE' ||
           c.changeType === 'DOWNGRADE' ||
           c.changeType === 'DISCONNECTION'),
     ).length;
     const waterfallEndArc =
       startArc + upgradesArcAdded - downgradesArcReduced - terminationsArcLost;
-    const pendingNetArc = currentArc - waterfallEndArc;
+    // Full gap between bucket sum and live Current ARC = probable-churn
+    // exclusion + genuine CRM-in-flight. Add probableChurnArc back so `pending`
+    // is only the CRM-in-flight part; the churn part rides its own waterfall row.
+    const pendingNetArc = currentArc - waterfallEndArc + probableChurnArc;
 
     // Changes still walking the internal approval chain (BASE only). These are
     // deliberately excluded from the buckets / Current ARC above — the change
@@ -721,18 +726,20 @@ export async function computeNewBase(
     }
   }
 
-  // Pending CRM settlement (same math as existingBase — see that comment).
-  // Adjustment to reconcile the waterfall end with the live currentArc.
+  // Pending CRM settlement (same math + churn-exclusion as existingBase — see
+  // that comment). Probable churn rides its own waterfall row, not this one.
+  const probableChurnAccountIds = new Set(probableChurnAccounts.map((a) => a.id));
   const newBasePendingCount = changes.filter(
     (c) =>
       !c.accountAppliedAt &&
+      !probableChurnAccountIds.has(c.accountId) &&
       (c.changeType === 'UPGRADE' ||
         c.changeType === 'DOWNGRADE' ||
         c.changeType === 'DISCONNECTION'),
   ).length;
   const newBaseWaterfallEndArc =
     totalNewArc + upgradesArcAdded - downgradesArcReduced - terminationsArcLost;
-  const newBasePendingNetArc = currentArc - newBaseWaterfallEndArc;
+  const newBasePendingNetArc = currentArc - newBaseWaterfallEndArc + probableChurnArc;
 
   return {
     totalCustomers,

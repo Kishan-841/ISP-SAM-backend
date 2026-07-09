@@ -212,6 +212,10 @@ describe('GET /dashboard/existing-base — waterfall aggregation', () => {
     // Probable churn block carries them.
     expect(res.body.probableChurn.count).toBe(2);
     expect(res.body.probableChurn.arcAtRiskLakh).toBeCloseTo(13, 1);
+    // ...and their ₹13L at-risk ARC must NOT leak into Pending CRM settlement
+    // (it rides its own "In retention" waterfall row). No CRM-in-flight here.
+    expect(res.body.pending.netArcLakh).toBeCloseTo(0, 1);
+    expect(res.body.pending.count).toBe(0);
   });
 
   it('aggregates RATE_REVISION', async () => {

@@ -124,6 +124,16 @@ export const approvalsService = {
   },
 
   /**
+   * How many changes are awaiting the requester's stage — the sidebar badge.
+   * Same scoping as listPending; 0 for roles with no queue (e.g. SAM).
+   */
+  async countPending(requester: Requester): Promise<number> {
+    const where = await pendingApprovalsWhere(requester);
+    if (!where) return 0;
+    return prisma.commercialChange.count({ where });
+  },
+
+  /**
    * Approve or reject the change at its current stage. Returns the updated row
    * (with the account's resulting contractStatus). Throws on:
    *   - not found / not pending

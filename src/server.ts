@@ -14,6 +14,7 @@ import { leadsRouter } from './modules/leads/leads.routes.js';
 import { meetingsRouter } from './modules/meetings/meetings.routes.js';
 import { notificationsRouter } from './modules/notifications/notifications.routes.js';
 import { probableChurnRouter } from './modules/probable-churn/probable-churn.routes.js';
+import { sidebarRouter } from './modules/sidebar/sidebar.routes.js';
 import { usersRouter } from './modules/users/users.routes.js';
 
 export const app = express();
@@ -49,6 +50,7 @@ app.use('/leads', leadsRouter);
 app.use('/meetings', meetingsRouter);
 app.use('/notifications', notificationsRouter);
 app.use('/probable-churn', probableChurnRouter);
+app.use('/sidebar', sidebarRouter);
 // Public endpoint — auth is enforced inside the router via HMAC, not JWT.
 app.use('/integrations', integrationsRouter);
 // Alias matching the contract's suggested path so the CRM team can configure

@@ -651,6 +651,7 @@ export const commercialChangesService = {
           select: {
             id: true,
             clientName: true,
+            companyName: true,
             customerCode: true,
             circuitId: true,
             kittyType: true,

@@ -44,14 +44,23 @@ const STAGE_ROLE: Record<PendingStage, UserRole> = {
   PENDING_ACCOUNTS: 'ACCOUNTS',
 };
 
-/** Next stage on approve; null = terminal (apply the real effect). */
-function nextStage(current: PendingStage, isQuickDisc: boolean): PendingStage | null {
+/**
+ * Next stage on approve; null = terminal (apply the real effect).
+ *
+ *   non-disconnection      ACCOUNTS(terminal)
+ *   disconnection (normal)  ACCOUNTS → SUPER_ADMIN_2(terminal)
+ *   disconnection (quick)   SAM_HEAD → ACCOUNTS → SUPER_ADMIN_2(terminal)
+ *
+ * SUPER_ADMIN_2 is the LAST gate on any disconnection — that's where material
+ * recovery is recorded and where the retention / termination timer starts.
+ */
+function nextStage(current: PendingStage, isDisconnection: boolean): PendingStage | null {
   switch (current) {
-    case 'PENDING_SUPER_ADMIN_2':
-      return isQuickDisc ? 'PENDING_SAM_HEAD' : 'PENDING_ACCOUNTS';
     case 'PENDING_SAM_HEAD':
       return 'PENDING_ACCOUNTS';
     case 'PENDING_ACCOUNTS':
+      return isDisconnection ? 'PENDING_SUPER_ADMIN_2' : null;
+    case 'PENDING_SUPER_ADMIN_2':
       return null;
   }
 }
@@ -246,6 +255,10 @@ export const approvalsService = {
     requesterRole: UserRole;
     ipAddress: string | null;
     userAgent: string | null;
+    /** Only meaningful on the SUPER_ADMIN_2 approval of a disconnection —
+     *  the final gate. `false` still approves; it's recorded, not blocking. */
+    materialRecovered?: boolean | null;
+    materialRecoveryNotes?: string | null;
   }) {
     const change = await prisma.commercialChange.findUnique({
       where: { id: opts.commercialChangeId },
@@ -329,11 +342,11 @@ async function approveChange(opts: {
   requesterRole: UserRole;
   ipAddress: string | null;
   userAgent: string | null;
+  materialRecovered?: boolean | null;
+  materialRecoveryNotes?: string | null;
 }) {
   const { change, stage, performedByUserId, ipAddress, userAgent } = opts;
-  const isQuickDisc =
-    change.changeType === 'DISCONNECTION' && change.disconnectionMode === 'QUICK';
-  const next = nextStage(stage, isQuickDisc);
+  const next = nextStage(stage, change.changeType === 'DISCONNECTION');
   const decidedAt = new Date();
 
   if (next) {
@@ -357,7 +370,16 @@ async function approveChange(opts: {
     ]);
   } else {
     // Terminal approval — mark APPROVED and apply the real effect atomically.
-    await applyTerminalApproval({ change, stage, performedByUserId, ipAddress, userAgent, decidedAt });
+    await applyTerminalApproval({
+      change,
+      stage,
+      performedByUserId,
+      ipAddress,
+      userAgent,
+      decidedAt,
+      materialRecovered: opts.materialRecovered ?? null,
+      materialRecoveryNotes: opts.materialRecoveryNotes ?? null,
+    });
   }
 
   return prisma.commercialChange.findUniqueOrThrow({
@@ -380,14 +402,36 @@ async function applyTerminalApproval(opts: {
   ipAddress: string | null;
   userAgent: string | null;
   decidedAt: Date;
+  materialRecovered: boolean | null;
+  materialRecoveryNotes: string | null;
 }): Promise<void> {
-  const { change, stage, performedByUserId, ipAddress, userAgent, decidedAt } = opts;
+  const {
+    change,
+    stage,
+    performedByUserId,
+    ipAddress,
+    userAgent,
+    decidedAt,
+    materialRecovered,
+    materialRecoveryNotes,
+  } = opts;
+
+  // Material recovery is captured only on the SUPER_ADMIN_2 gate, which is
+  // terminal for disconnections. Ignored on non-disconnection rows.
+  const materialFields =
+    change.changeType === 'DISCONNECTION'
+      ? {
+          materialRecovered,
+          materialRecoveryNotes: materialRecoveryNotes?.trim() || null,
+        }
+      : {};
 
   const auditPayload: Prisma.InputJsonValue = {
     from: stage,
     changeType: change.changeType,
     accountId: change.accountId,
     disconnectionMode: change.disconnectionMode,
+    ...(change.changeType === 'DISCONNECTION' ? { materialRecovered } : {}),
   };
 
   if (change.changeType !== 'DISCONNECTION') {
@@ -439,6 +483,7 @@ async function applyTerminalApproval(opts: {
           scheduledTerminationAt,
           retentionDecision: 'PROCEED',
           retentionDecidedAt: decidedAt,
+          ...materialFields,
         },
       }),
       prisma.account.update({
@@ -474,6 +519,7 @@ async function applyTerminalApproval(opts: {
         approvedBy: performedByUserId,
         approvedAt: decidedAt,
         retentionPromptDueAt: prompt,
+        ...materialFields,
       },
     }),
     prisma.account.update({
@@ -570,6 +616,10 @@ function serializeQueueRow(
     approvedAt: c.approvedAt?.toISOString() ?? null,
     rejectedAt: c.rejectedAt?.toISOString() ?? null,
     decidedByName: null as string | null,
+    // Material recovery — recorded by SUPER_ADMIN_2 on the final disconnection
+    // approval. NULL on non-disconnections / anything not yet finalised.
+    materialRecovered: c.materialRecovered,
+    materialRecoveryNotes: c.materialRecoveryNotes,
     account: {
       id: c.account.id,
       clientName: c.account.clientName,

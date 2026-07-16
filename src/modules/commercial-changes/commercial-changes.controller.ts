@@ -66,6 +66,10 @@ const approvalDecisionSchema = z.object({
   // Mandatory on REJECT — the service enforces the length; optional here so
   // an APPROVE with no reason still parses.
   reason: z.string().optional(),
+  // Only meaningful on the SUPER_ADMIN_2 approval of a disconnection (the
+  // final gate). Ignored elsewhere. `false` still approves — it's recorded.
+  materialRecovered: z.boolean().optional(),
+  materialRecoveryNotes: z.string().optional(),
 });
 
 export const commercialChangesController = {
@@ -433,6 +437,8 @@ export const commercialChangesController = {
         requesterRole: req.user.role,
         ipAddress: ctx.ip,
         userAgent: ctx.userAgent,
+        materialRecovered: parse.data.materialRecovered ?? null,
+        materialRecoveryNotes: parse.data.materialRecoveryNotes ?? null,
       });
       res.json({ change });
     } catch (err) {

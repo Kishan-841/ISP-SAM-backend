@@ -478,10 +478,11 @@ export const commercialChangesService = {
       // Every BASE commercial change now goes through the approval chain.
       // NO CRM service-order is raised and nothing is applied to the account
       // until the chain terminates in APPROVED (see approvals.service.ts).
-      //   UPGRADE / DOWNGRADE / RATE_REVISION → ACCOUNTS
-      //   DISCONNECTION (normal or quick)     → SUPER_ADMIN_2 (first stage)
-      const initialStage: ApprovalStatus =
-        input.changeType === 'DISCONNECTION' ? 'PENDING_SUPER_ADMIN_2' : 'PENDING_ACCOUNTS';
+      //   UPGRADE / DOWNGRADE / RATE_REVISION → ACCOUNTS (terminal)
+      //   DISCONNECTION (normal)              → ACCOUNTS → SUPER_ADMIN_2
+      //   DISCONNECTION (quick)               → SAM_HEAD → ACCOUNTS → SUPER_ADMIN_2
+      // SUPER_ADMIN_2 is the final gate on disconnections (material recovery).
+      const initialStage: ApprovalStatus = isQuick ? 'PENDING_SAM_HEAD' : 'PENDING_ACCOUNTS';
       await enterApprovalChain(result.id, initialStage);
       crm = { ok: 'pending-approval', stage: initialStage };
     } else if (input.changeType === 'DISCONNECTION') {

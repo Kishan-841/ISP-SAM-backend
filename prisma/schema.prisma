@@ -235,11 +235,19 @@ model CommercialChange {
   /// with the other decidedBy columns; we don't cascade on user delete here.
   rejectedBy             String?              @map("rejected_by") @db.Uuid
   rejectedAt             DateTime?            @map("rejected_at") @db.Timestamptz(6)
-  /// User id of the ACCOUNTS approver who gave the final APPROVED sign-off,
-  /// and when. Populated on the terminal approval so the Approved history tab
-  /// can show who/when without joining audit_logs.
+  /// User id of the approver who gave the final APPROVED sign-off, and when.
+  /// Populated on the terminal approval so the Approved history tab can show
+  /// who/when without joining audit_logs. Terminal stage is ACCOUNTS for
+  /// non-disconnections and SUPER_ADMIN_2 for disconnections.
   approvedBy             String?              @map("approved_by") @db.Uuid
   approvedAt             DateTime?            @map("approved_at") @db.Timestamptz(6)
+
+  /// Material-recovery outcome, captured by SUPER_ADMIN_2 on the FINAL
+  /// disconnection approval. `false` (not recovered) still approves — it's
+  /// recorded for follow-up, never blocking. NULL on non-disconnection rows
+  /// and on anything decided before this stage existed.
+  materialRecovered      Boolean?             @map("material_recovered")
+  materialRecoveryNotes  String?              @map("material_recovery_notes")
 
   createdAt              DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
 

@@ -497,6 +497,16 @@ export const accountsService = {
       });
       if (!before) throw new Error('Account not found');
 
+      // SAM_HEAD may only assign customers OUT of the unassigned triage queue.
+      // Touching an account that already has an owner is ADMIN-only. This
+      // covers unassign too, not just reassign — otherwise a head could
+      // unassign and then re-assign to a different SAM as a backdoor.
+      if (requester.role === 'SAM_HEAD' && before.samOwnerId) {
+        throw new Error(
+          'REASSIGN_FORBIDDEN: Only an ADMIN can change the owner of an already-assigned customer.',
+        );
+      }
+
       const updated = await tx.account.update({
         where: { id: accountId },
         data: { samOwnerId: samUserId },

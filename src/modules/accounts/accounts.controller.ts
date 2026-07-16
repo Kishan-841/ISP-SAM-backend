@@ -154,6 +154,10 @@ export const accountsController = {
       });
       res.json({ account });
     } catch (err) {
+      if (err instanceof Error && err.message.startsWith('REASSIGN_FORBIDDEN')) {
+        res.status(403).json({ error: err.message });
+        return;
+      }
       if (err instanceof Error && err.message === 'Account not found') {
         res.status(404).json({ error: err.message });
         return;

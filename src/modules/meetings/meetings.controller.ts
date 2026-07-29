@@ -3,6 +3,21 @@ import { z } from 'zod';
 import { meetingsService } from './meetings.service.js';
 import type { AuthedRequest } from '../auth/auth.middleware.js';
 
+/**
+ * Permissive email check for the MoM To/Cc fields.
+ *
+ * zod's `.email()` is RFC-strict and rejects a dot immediately before the `@`
+ * (e.g. `abc.@domain.com`) as well as leading dots. Some real customer
+ * addresses look like that, and blocking them stops the SAM team sending the
+ * MoM. The actual delivery goes through the operator's own Outlook ("Copy for
+ * Outlook") or the audited transport, so strict RFC validation isn't worth it
+ * here — we only need "looks like an address": something@something.tld.
+ */
+const looseEmail = z
+  .string()
+  .trim()
+  .refine((s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s), 'Enter a valid email address');
+
 const actionItemSchema = z.object({
   srNo: z.number().int(),
   discussionDescription: z.string().min(1),
@@ -44,8 +59,8 @@ const sendMomEmailSchema = z.object({
   gazonParticipants: z.string().optional(),
   actionItems: z.array(actionItemSchema).optional(),
   momContent: z.string().min(1, 'MoM content is required'),
-  to: z.string().email().optional(),
-  cc: z.array(z.string().email()).optional(),
+  to: looseEmail.optional(),
+  cc: z.array(looseEmail).optional(),
   subject: z.string().optional(),
   samDesignation: z.string().optional(),
   samPhone: z.string().optional(),
@@ -76,8 +91,8 @@ const completeMeetingSchema = z.object({
   gazonParticipants: z.string().optional(),
   actionItems: z.array(actionItemSchema).optional(),
   momContent: z.string().min(1, 'MoM content is required'),
-  to: z.string().email().optional(),
-  cc: z.array(z.string().email()).optional(),
+  to: looseEmail.optional(),
+  cc: z.array(looseEmail).optional(),
   subject: z.string().optional(),
   samDesignation: z.string().optional(),
   samPhone: z.string().optional(),

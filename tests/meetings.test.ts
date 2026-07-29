@@ -154,3 +154,32 @@ describe('POST /meetings/:id/mom', () => {
     expect(audits).toHaveLength(1);
   });
 });
+
+describe('POST /meetings/:id/send-mom-email — email validation', () => {
+  async function heldMeeting() {
+    const { cookie, user } = await adminCookie();
+    const acct = await seedAccount({ clientName: 'Acme' });
+    const meeting = await prisma.meeting.create({
+      data: { accountId: acct.id, scheduledAt: new Date(), heldAt: new Date(), createdBy: user.id },
+    });
+    return { cookie, meetingId: meeting.id };
+  }
+
+  it('accepts a To/Cc address with a dot right before the @ (real-world local part)', async () => {
+    const { cookie, meetingId } = await heldMeeting();
+    const res = await request(app)
+      .post(`/meetings/${meetingId}/send-mom-email`)
+      .set('Cookie', cookie)
+      .send({ momContent: 'MoM body', to: 'abc.@email.com', cc: ['p.k.@gazon.com'], testMode: true });
+    expect(res.status).not.toBe(400);
+  });
+
+  it('still rejects an obviously malformed To address', async () => {
+    const { cookie, meetingId } = await heldMeeting();
+    const res = await request(app)
+      .post(`/meetings/${meetingId}/send-mom-email`)
+      .set('Cookie', cookie)
+      .send({ momContent: 'MoM body', to: 'not-an-email', testMode: true });
+    expect(res.status).toBe(400);
+  });
+});

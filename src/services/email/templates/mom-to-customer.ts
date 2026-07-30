@@ -116,7 +116,7 @@ function renderActionItemsTable(items: ActionItem[]): string {
       <td style="padding:12px 14px;font-size:13px;color:#111827;border-top:1px solid #f3f4f6;vertical-align:top;">${idx + 1}</td>
       <td style="padding:12px 14px;font-size:13px;color:#111827;border-top:1px solid #f3f4f6;vertical-align:top;">${escapeHtml(it.discussionDescription)}</td>
       <td style="padding:12px 14px;font-size:13px;color:#374151;border-top:1px solid #f3f4f6;vertical-align:top;">${escapeHtml(it.actionOwner || '—')}</td>
-      <td style="padding:12px 14px;font-size:13px;color:#374151;border-top:1px solid #f3f4f6;vertical-align:top;">${escapeHtml(it.planOfAction || '—')}</td>
+      <td style="padding:12px 14px;font-size:13px;color:#374151;border-top:1px solid #f3f4f6;vertical-align:top;">${escapeHtml(it.planOfAction || '—').replace(/\n/g, '<br>')}</td>
       <td style="padding:12px 14px;font-size:13px;color:#374151;border-top:1px solid #f3f4f6;vertical-align:top;white-space:nowrap;">${escapeHtml(it.closureDate || '—')}</td>
       <td style="padding:12px 14px;border-top:1px solid #f3f4f6;vertical-align:top;">${renderStatusPill(it.currentStatus)}</td>
     </tr>`,

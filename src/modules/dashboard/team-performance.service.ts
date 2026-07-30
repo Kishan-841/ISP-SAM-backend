@@ -18,6 +18,9 @@ export type SamRow = {
   changes: Record<CommercialChangeType, { count: number; arcImpact: number }>;
   totalChanges: number;
   meetingsHeld: number;
+  /** Held meetings by mode. meetingsOnline + meetingsOffline === meetingsHeld. */
+  meetingsOnline: number;
+  meetingsOffline: number;
   momsSent: number;
   momSlaPercent: number;       // % MOMs sent within 48h of meeting heldAt
   approvalPercent: number;     // % commercial changes with approval attached
@@ -55,6 +58,8 @@ export type TeamPerformance = {
     momsPending: number;
     momsSent: number;
     meetingsHeld: number;
+    meetingsOnline: number;
+    meetingsOffline: number;
     activationPending: number;
     customersWithoutMeeting30d: number;
     /** Team-wide net churn ₹ — sum of per-SAM netChurnArc. */
@@ -114,6 +119,8 @@ export async function computeTeamPerformance({
         momsPending: 0,
         momsSent: 0,
         meetingsHeld: 0,
+        meetingsOnline: 0,
+        meetingsOffline: 0,
         activationPending: 0,
         customersWithoutMeeting30d: 0,
         netChurnArc: 0,
@@ -161,6 +168,7 @@ export async function computeTeamPerformance({
         accountId: true,
         heldAt: true,
         momSentAt: true,
+        meetingType: true,
         account: { select: { samOwnerId: true } },
       },
     }),
@@ -240,6 +248,10 @@ export async function computeTeamPerformance({
 
     // MOM discipline.
     const heldMeetings = samMeetings.filter((m) => m.heldAt !== null);
+    // Held meetings split by mode. PHYSICAL === "offline". Partition of
+    // heldMeetings, so online + offline === meetingsHeld.
+    const meetingsOnline = heldMeetings.filter((m) => m.meetingType === 'ONLINE').length;
+    const meetingsOffline = heldMeetings.filter((m) => m.meetingType === 'PHYSICAL').length;
     const momsSent = samMeetings.filter((m) => m.momSentAt !== null).length;
     const momsWithin48h = heldMeetings.filter((m) => {
       if (!m.heldAt || !m.momSentAt) return false;
@@ -311,6 +323,8 @@ export async function computeTeamPerformance({
       changes: bucketsToRoundedNumbers(changeBuckets),
       totalChanges,
       meetingsHeld: heldMeetings.length,
+      meetingsOnline,
+      meetingsOffline,
       momsSent,
       momSlaPercent: round1(momSlaPercent),
       approvalPercent: round1(approvalPercent),
@@ -332,6 +346,8 @@ export async function computeTeamPerformance({
   const teamTotalChanges = samRows.reduce((s, r) => s + r.totalChanges, 0);
   const teamActivationPending = samRows.reduce((s, r) => s + r.activationPending, 0);
   const teamMeetingsHeld = samRows.reduce((s, r) => s + r.meetingsHeld, 0);
+  const teamMeetingsOnline = samRows.reduce((s, r) => s + r.meetingsOnline, 0);
+  const teamMeetingsOffline = samRows.reduce((s, r) => s + r.meetingsOffline, 0);
   const teamMomsSent = samRows.reduce((s, r) => s + r.momsSent, 0);
 
   // MOMs pending = held meetings without momSentAt
@@ -385,6 +401,8 @@ export async function computeTeamPerformance({
       momsPending,
       momsSent: teamMomsSent,
       meetingsHeld: teamMeetingsHeld,
+      meetingsOnline: teamMeetingsOnline,
+      meetingsOffline: teamMeetingsOffline,
       activationPending: teamActivationPending,
       customersWithoutMeeting30d,
       netChurnArc: round0(teamNetChurnArc),
@@ -499,7 +517,13 @@ export type SamDetail = {
       arcDeltaPercent: number;
     };
     commercialChanges: { value: number; teamAvg: number; activationPending: number };
-    meetings: { value: number; teamAvg: number; upcomingCount: number };
+    meetings: {
+      value: number;
+      teamAvg: number;
+      upcomingCount: number;
+      online: number;
+      offline: number;
+    };
     momSla: { value: number; teamAvg: number; momsOverdue: number };
   };
   changes: Record<CommercialChangeType, { count: number; arcImpact: number }>;
@@ -664,6 +688,7 @@ export async function computeSamDetail({
         scheduledAt: true,
         heldAt: true,
         momSentAt: true,
+        meetingType: true,
         account: {
           select: { samOwnerId: true, clientName: true, companyName: true },
         },
@@ -879,6 +904,8 @@ export async function computeSamDetail({
         value: self.meetingsHeld,
         teamAvg: round1(avg.meetingsHeld),
         upcomingCount: upcoming.length,
+        online: self.meetingsOnline,
+        offline: self.meetingsOffline,
       },
       momSla: {
         value: round1(self.momSlaPercent),
@@ -943,6 +970,8 @@ type RolledRow = {
   changes: Record<CommercialChangeType, { count: number; arcImpact: number }>;
   totalChanges: number;
   meetingsHeld: number;
+  meetingsOnline: number;
+  meetingsOffline: number;
   momsSent: number;
   momSlaPercent: number;
   approvalPercent: number;
@@ -965,7 +994,12 @@ function rollUpSam(
     clientApprovalAttached: boolean;
     crmStatus: string | null;
   }>,
-  samMeetings: Array<{ accountId: string; heldAt: Date | null; momSentAt: Date | null }>,
+  samMeetings: Array<{
+    accountId: string;
+    heldAt: Date | null;
+    momSentAt: Date | null;
+    meetingType?: 'ONLINE' | 'PHYSICAL';
+  }>,
 ): RolledRow {
   const activeAccounts = samAccounts.filter((a) => a.contractStatus !== 'TERMINATED');
   const totalArc = activeAccounts.reduce((s, a) => s + Number(a.currentArc), 0);
@@ -1002,6 +1036,8 @@ function rollUpSam(
   }
 
   const heldMeetings = samMeetings.filter((m) => m.heldAt !== null);
+  const meetingsOnline = heldMeetings.filter((m) => m.meetingType === 'ONLINE').length;
+  const meetingsOffline = heldMeetings.filter((m) => m.meetingType === 'PHYSICAL').length;
   const momsSent = samMeetings.filter((m) => m.momSentAt !== null).length;
   const momsWithin48h = heldMeetings.filter((m) => {
     if (!m.heldAt || !m.momSentAt) return false;
@@ -1047,6 +1083,8 @@ function rollUpSam(
     changes: changeBuckets,
     totalChanges: samChanges.length,
     meetingsHeld: heldMeetings.length,
+    meetingsOnline,
+    meetingsOffline,
     momsSent,
     momSlaPercent,
     approvalPercent,
@@ -1079,6 +1117,8 @@ function averageRows(rows: RolledRow[]): RolledRow {
     },
     totalChanges: sum((r) => r.totalChanges) / n,
     meetingsHeld: sum((r) => r.meetingsHeld) / n,
+    meetingsOnline: sum((r) => r.meetingsOnline) / n,
+    meetingsOffline: sum((r) => r.meetingsOffline) / n,
     momsSent: sum((r) => r.momsSent) / n,
     momSlaPercent: sum((r) => r.momSlaPercent) / n,
     approvalPercent: sum((r) => r.approvalPercent) / n,

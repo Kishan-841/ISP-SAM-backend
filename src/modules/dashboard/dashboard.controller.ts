@@ -6,6 +6,7 @@ import {
   type FyQuarter,
 } from './dashboard.service.js';
 import { computeSamDetail, computeTeamPerformance } from './team-performance.service.js';
+import { computeMeetingSummary } from './meeting-summary.service.js';
 import { computeAlerts } from './alerts.service.js';
 import { getBucketChanges } from './bucket-changes.service.js';
 import type { AuthedRequest } from '../auth/auth.middleware.js';
@@ -18,6 +19,20 @@ const BUCKETS: readonly CommercialChangeType[] = [
   'RATE_REVISION',
   'DISCONNECTION',
 ];
+
+/** Parse a YYYY-MM-DD query param to the start of that local day, else null. */
+function startOfDay(s?: string): Date | null {
+  const m = s ? /^(\d{4})-(\d{2})-(\d{2})/.exec(s) : null;
+  if (!m) return null;
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 0, 0, 0, 0);
+}
+
+/** Parse a YYYY-MM-DD query param to the end of that local day (inclusive), else null. */
+function endOfDay(s?: string): Date | null {
+  const m = s ? /^(\d{4})-(\d{2})-(\d{2})/.exec(s) : null;
+  if (!m) return null;
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 23, 59, 59, 999);
+}
 
 export const dashboardController = {
   async existingBase(req: AuthedRequest, res: Response) {
@@ -74,6 +89,24 @@ export const dashboardController = {
       res.status(404).json({ error: 'SAM not found or not in your team' });
       return;
     }
+    res.json(data);
+  },
+
+  async meetingSummary(req: AuthedRequest, res: Response) {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthenticated' });
+      return;
+    }
+    const fromStr = typeof req.query.from === 'string' ? req.query.from : undefined;
+    const toStr = typeof req.query.to === 'string' ? req.query.to : undefined;
+    let from = startOfDay(fromStr);
+    let to = endOfDay(toStr);
+    // Invalid ordering → fall back to all-time.
+    if (from && to && from.getTime() > to.getTime()) {
+      from = null;
+      to = null;
+    }
+    const data = await computeMeetingSummary({ from, to, requester: req.user });
     res.json(data);
   },
 

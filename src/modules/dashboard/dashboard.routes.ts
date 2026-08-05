@@ -17,4 +17,9 @@ dashboardRouter.get(
   requireRole('ADMIN', 'SAM_HEAD'),
   dashboardController.samDetail,
 );
+dashboardRouter.get(
+  '/meeting-summary',
+  requireRole('ADMIN', 'SAM_HEAD', 'SUPER_ADMIN_2'),
+  dashboardController.meetingSummary,
+);
 dashboardRouter.get('/alerts', dashboardController.alerts);

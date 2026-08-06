@@ -6,6 +6,7 @@ import { auditRouter } from './modules/audit/audit.routes.js';
 import { authRouter } from './modules/auth/auth.routes.js';
 import { commercialChangesRouter } from './modules/commercial-changes/commercial-changes.routes.js';
 import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
+import { feedbackRouter } from './modules/feedback/feedback.routes.js';
 import {
   integrationsRouter,
   crmWebhookAliasRouter,
@@ -42,6 +43,7 @@ app.get('/health', (_req, res) => {
 
 app.use('/auth', authRouter);
 app.use('/dashboard', dashboardRouter);
+app.use('/feedback', feedbackRouter);
 app.use('/users', usersRouter);
 app.use('/accounts', accountsRouter);
 app.use('/audit-logs', auditRouter);

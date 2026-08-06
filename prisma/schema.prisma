@@ -452,6 +452,37 @@ model User {
   ownedAccounts      Account[]           @relation("SamOwner")
   notificationStates NotificationState[]
   samLeadDispatches  SamLeadDispatch[]
+  feedbacks          Feedback[]
 
   @@map("users")
+}
+
+/// Public customer feedback survey submission. Filled unauthenticated via the
+/// shared /feedback link. `responses` holds the full answer set keyed by
+/// question id; the extracted columns exist for the Feedbacks list + filters.
+model Feedback {
+  id            String   @id @default(uuid()) @db.Uuid
+  /// Q2 Contact Person.
+  customerName  String   @map("customer_name")
+  /// Q1 Company Name.
+  companyName   String   @map("company_name")
+  /// The "Your SAM" dropdown selection (role = SAM). Restricted delete so a
+  /// SAM with feedback can't be silently removed.
+  samId         String   @map("sam_id") @db.Uuid
+  sam           User     @relation(fields: [samId], references: [id], onDelete: Restrict)
+  /// Full answer set: { [questionId]: value }.
+  responses     Json
+  /// Mean of the 1–5 rating questions (Q7/Q8/Q9). Null if none answered.
+  overallScore  Float?   @map("overall_score")
+  /// Derived band: Very High | High | Medium | Low | Very Low. Null if no ratings.
+  interestLevel String?  @map("interest_level")
+  /// Q10 NPS, 0–10. Stored separately from the 1–5 average.
+  npsScore      Int?     @map("nps_score")
+  submittedAt   DateTime @default(now()) @map("submitted_at") @db.Timestamptz(6)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([samId])
+  @@index([submittedAt])
+  @@map("feedbacks")
 }

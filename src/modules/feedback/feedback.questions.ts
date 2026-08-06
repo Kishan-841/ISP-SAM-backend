@@ -62,7 +62,8 @@ export const FEEDBACK_QUESTIONS: FeedbackQuestion[] = [
   { id: 'q3', section: 1, label: 'Designation', type: 'text', required: false },
   { id: 'q4', section: 1, label: 'Email Address', type: 'email', required: true },
   { id: 'q5', section: 1, label: 'Mobile Number', type: 'tel', required: true },
-  { id: 'q6', section: 1, label: 'Service Manager Name', type: 'text', required: false },
+  // Q6 "Service Manager Name" intentionally removed — the mandatory "Your SAM"
+  // dropdown below covers it without the redundant free-text field.
   {
     id: 'yourSam',
     section: 1,
@@ -80,7 +81,6 @@ export const FEEDBACK_QUESTIONS: FeedbackQuestion[] = [
     type: 'rating5',
     required: true,
     isRating: true,
-    help: '5 = Excellent, 1 = Very Poor.',
   },
   {
     id: 'q8',

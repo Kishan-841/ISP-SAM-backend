@@ -20,6 +20,17 @@ const BUCKETS: readonly CommercialChangeType[] = [
   'DISCONNECTION',
 ];
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Parse the dashboard's SAM dropdown filter. A malformed value is ignored
+ * (the dashboard falls back to the requester's full scope) rather than
+ * rejected — a stale bookmark shouldn't 400 the whole page.
+ */
+function samFilter(raw: unknown): string | undefined {
+  return typeof raw === 'string' && UUID_RE.test(raw) ? raw : undefined;
+}
+
 /** Parse a YYYY-MM-DD query param to the start of that local day, else null. */
 function startOfDay(s?: string): Date | null {
   const m = s ? /^(\d{4})-(\d{2})-(\d{2})/.exec(s) : null;
@@ -44,7 +55,11 @@ export const dashboardController = {
     const quarter: FyQuarter | undefined = (QUARTERS as readonly string[]).includes(raw ?? '')
       ? (raw as FyQuarter)
       : undefined;
-    const data = await dashboardService.existingBase({ quarter, requester: req.user });
+    const data = await dashboardService.existingBase({
+      quarter,
+      samId: samFilter(req.query.sam),
+      requester: req.user,
+    });
     res.json(data);
   },
 
@@ -53,7 +68,10 @@ export const dashboardController = {
       res.status(401).json({ error: 'Unauthenticated' });
       return;
     }
-    const data = await computeNewBase({ requester: req.user });
+    const data = await computeNewBase({
+      requester: req.user,
+      samId: samFilter(req.query.sam),
+    });
     res.json(data);
   },
 
@@ -146,6 +164,7 @@ export const dashboardController = {
       kittyType: rawKitty as KittyType,
       bucket: rawBucket as CommercialChangeType,
       quarter,
+      samId: samFilter(req.query.sam),
       requester: req.user,
     });
     res.json(data);

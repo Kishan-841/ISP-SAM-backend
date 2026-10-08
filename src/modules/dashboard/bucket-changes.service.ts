@@ -50,11 +50,17 @@ export async function getBucketChanges(opts: {
   kittyType: KittyType;
   bucket: CommercialChangeType;
   quarter?: FyQuarter;
+  /** SAM dropdown filter carried over from the parent dashboard. */
+  samId?: string;
   requester: Requester;
 }): Promise<{ changes: BucketChangeRow[] }> {
   const accountWhere: Prisma.AccountWhereInput = { kittyType: opts.kittyType };
   if (opts.requester.role === 'SAM') {
     accountWhere.samOwnerId = opts.requester.id;
+  } else if (opts.samId) {
+    // Only honoured for non-SAM roles — a SAM stays pinned to their own
+    // customers regardless of what the query string asks for.
+    accountWhere.samOwnerId = opts.samId;
   }
 
   const where: Prisma.CommercialChangeWhereInput = {

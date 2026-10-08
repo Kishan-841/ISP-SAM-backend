@@ -13,8 +13,22 @@ export type DashboardRequester = { id: string; role: UserRole };
  *  - ADMIN     → everything
  *  - SAM_HEAD  → own customers + their reports' customers
  *  - SAM       → only own customers
+ *
+ * `samId` is the dashboard's SAM dropdown. It NARROWS the role scope and can
+ * never widen it: the two clauses are ANDed, so a SAM_HEAD who hand-types a
+ * SAM outside their team gets an empty dashboard rather than another team's
+ * numbers. No membership lookup needed — the intersection is the guard.
  */
 async function buildAccountScope(
+  requester: DashboardRequester,
+  samId?: string,
+): Promise<Prisma.AccountWhereInput> {
+  const roleScope = await buildRoleScope(requester);
+  if (!samId) return roleScope;
+  return { AND: [roleScope, { samOwnerId: samId }] };
+}
+
+async function buildRoleScope(
   requester: DashboardRequester,
 ): Promise<Prisma.AccountWhereInput> {
   // ADMIN and the org-wide approver roles (ACCOUNTS, SUPER_ADMIN_2) see
@@ -181,13 +195,15 @@ const LAKH = 100_000;
 export const dashboardService = {
   async existingBase(opts: {
     quarter?: FyQuarter;
+    /** Optional SAM dropdown filter — narrows the role scope, never widens it. */
+    samId?: string;
     requester: DashboardRequester;
   }): Promise<ExistingBaseMetrics> {
     // Sweep any disconnections whose 10-day notice has expired so the
     // dashboard reflects current truth before we read accounts/changes.
     await sweepDueTerminations();
 
-    const scope = await buildAccountScope(opts.requester);
+    const scope = await buildAccountScope(opts.requester, opts.samId);
 
     // 1. BASE accounts snapshot — always anchored to April 1.
     //    Scope-filtered so a SAM only sees their own customers, etc.
@@ -512,14 +528,14 @@ function daysBetween(later: Date, earlier: Date): number {
 }
 
 export async function computeNewBase(
-  opts: { requester: DashboardRequester },
+  opts: { requester: DashboardRequester; samId?: string },
   now: Date = new Date(),
 ): Promise<NewBaseMetrics> {
   // Sweep any disconnections whose 10-day notice has expired so this view
   // reflects current truth — mirrors the existingBase entry point.
   await sweepDueTerminations();
 
-  const scope = await buildAccountScope(opts.requester);
+  const scope = await buildAccountScope(opts.requester, opts.samId);
 
   const newAccounts = await prisma.account.findMany({
     where: { kittyType: 'NEW', ...scope },
